@@ -3,6 +3,8 @@ import * as path from 'path';
 import * as fs from 'fs';
 import { execFile } from 'child_process';
 import {
+    CloseAction,
+    ErrorAction,
     LanguageClient,
     LanguageClientOptions,
     ServerOptions,
@@ -203,6 +205,20 @@ async function startLspServer(): Promise<void> {
     const serverCommand = config.get<string>('lsp.pythonPath', 'python3');
     const serverArgs = ['-m', 'lispy.lsp'];
 
+    // Probe first — fail fast with a clear message instead of crash-looping
+    const probe = await probePython(serverCommand);
+    if (!probe) {
+        throw new Error(
+            `Cannot run '${serverCommand}'. Click the status bar or run "LisPython: Select Python Interpreter".`
+        );
+    }
+    if (!probe.hasLispy) {
+        throw new Error(
+            `Python at '${serverCommand}' does not have lispython installed. ` +
+            `Install it with 'pip install lispython' or select a different interpreter.`
+        );
+    }
+
     const serverOptions: ServerOptions = {
         command: serverCommand,
         args: serverArgs,
@@ -212,6 +228,11 @@ async function startLspServer(): Promise<void> {
         documentSelector: [{ scheme: 'file', language: 'lispython' }],
         synchronize: {
             fileEvents: vscode.workspace.createFileSystemWatcher('**/*.lpy'),
+        },
+        errorHandler: {
+            // Close the client after the first unexpected exit — don't crash-loop
+            error: () => ({ action: ErrorAction.Shutdown }),
+            closed: () => ({ action: CloseAction.DoNotRestart }),
         },
     };
 
@@ -567,9 +588,15 @@ export async function activate(context: vscode.ExtensionContext) {
     try {
         await startLspServer();
     } catch (err) {
-        vscode.window.showWarningMessage(
-            `LisPython LSP failed to start: ${err}. Click the status bar to select a Python interpreter with lispython installed.`
+        const msg = err instanceof Error ? err.message : String(err);
+        const pick = 'Select Interpreter';
+        const choice = await vscode.window.showWarningMessage(
+            `LisPython LSP: ${msg}`,
+            pick,
         );
+        if (choice === pick) {
+            vscode.commands.executeCommand('lispython.selectPythonPath');
+        }
     }
 }
 

@@ -27,6 +27,7 @@
     },
     "string": {
       "patterns": [
+        { "include": "#fstring-interp-escaped-string" },
         { "include": "#fstring-triple-double" },
         { "include": "#fstring-double" },
         { "include": "#triple-double-string" },
@@ -95,6 +96,11 @@
       "name": "constant.character.escape.lispython",
       "match": "\\\\."
     },
+    "fstring-interp-escaped-string": {
+      "name": "string.quoted.double.lispython",
+      "begin": "\\\\\"",
+      "end": "\\\\\""
+    },
     "fstring-interpolation": {
       "name": "meta.interpolation.lispython",
       "begin": "\\{",
@@ -106,6 +112,7 @@
         "0": { "name": "punctuation.definition.interpolation.end.lispython" }
       },
       "patterns": [
+        { "include": "#fstring-interp-escaped-string" },
         { "include": "$self" }
       ]
     },

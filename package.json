@@ -2,7 +2,7 @@
   "name": "vscode-lispython",
   "displayName": "LisPython",
   "description": "Language support for LisPython (.lpy) — a Lisp-like syntax for Python",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "publisher": "jetack",
   "license": "MIT",
   "repository": {
@@ -18,6 +18,16 @@
   "main": "./out/extension.js",
   "extensionKind": [
     "workspace"
+  ],
+  "activationEvents": [
+    "onLanguage:lispython",
+    "onCommand:lispython.selectPythonPath",
+    "onCommand:lispython.restartServer",
+    "onCommand:lispython.runFile",
+    "onCommand:lispython.startRepl",
+    "onCommand:lispython.sendToRepl",
+    "onCommand:lispython.sendLastSexp",
+    "onCommand:lispython.sendTopLevelForm"
   ],
   "contributes": {
     "commands": [
