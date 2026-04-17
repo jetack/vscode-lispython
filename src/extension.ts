@@ -239,6 +239,88 @@ async function restartLspServer(): Promise<void> {
 }
 
 // ---------------------------------------------------------------------------
+// Run / REPL terminal integration
+// ---------------------------------------------------------------------------
+
+let replTerminal: vscode.Terminal | undefined;
+
+function getLpyCommand(): string {
+    const config = vscode.workspace.getConfiguration('lispython');
+    const explicit = config.get<string>('lpyPath', '');
+    if (explicit) return explicit;
+
+    // Prefer the venv's lpy if we're using a venv Python
+    const pythonPath = config.get<string>('lsp.pythonPath', '');
+    if (pythonPath && pythonPath.includes('/')) {
+        const lpyInVenv = path.join(path.dirname(pythonPath), 'lpy');
+        if (fs.existsSync(lpyInVenv)) return lpyInVenv;
+    }
+
+    return 'lpy';
+}
+
+function getOrCreateReplTerminal(): vscode.Terminal {
+    if (replTerminal && replTerminal.exitStatus === undefined) {
+        return replTerminal;
+    }
+    replTerminal = vscode.window.createTerminal({
+        name: 'LisPython REPL',
+        shellPath: getLpyCommand(),
+    });
+    return replTerminal;
+}
+
+async function runFile(): Promise<void> {
+    const editor = vscode.window.activeTextEditor;
+    if (!editor || editor.document.languageId !== 'lispython') {
+        vscode.window.showErrorMessage('No LisPython file is active.');
+        return;
+    }
+
+    // Save first so the file on disk is current
+    if (editor.document.isDirty) {
+        await editor.document.save();
+    }
+
+    const filePath = editor.document.uri.fsPath;
+    const lpy = getLpyCommand();
+    const terminal = vscode.window.createTerminal({
+        name: `Run: ${path.basename(filePath)}`,
+        cwd: path.dirname(filePath),
+    });
+    terminal.show();
+    terminal.sendText(`${lpy} ${JSON.stringify(filePath)}`);
+}
+
+async function startRepl(): Promise<void> {
+    const terminal = getOrCreateReplTerminal();
+    terminal.show();
+}
+
+async function sendSelectionToRepl(): Promise<void> {
+    const editor = vscode.window.activeTextEditor;
+    if (!editor || editor.document.languageId !== 'lispython') {
+        vscode.window.showErrorMessage('No LisPython file is active.');
+        return;
+    }
+
+    const selection = editor.selection;
+    let text: string;
+    if (selection.isEmpty) {
+        // Send current line if nothing selected
+        text = editor.document.lineAt(selection.active.line).text;
+    } else {
+        text = editor.document.getText(selection);
+    }
+
+    if (!text.trim()) return;
+
+    const terminal = getOrCreateReplTerminal();
+    terminal.show(true); // preserveFocus so cursor stays in editor
+    terminal.sendText(text);
+}
+
+// ---------------------------------------------------------------------------
 // Activation / deactivation
 // ---------------------------------------------------------------------------
 
@@ -247,6 +329,9 @@ export async function activate(context: vscode.ExtensionContext) {
     context.subscriptions.push(
         vscode.commands.registerCommand('lispython.selectPythonPath', selectPythonPath),
         vscode.commands.registerCommand('lispython.restartServer', restartLspServer),
+        vscode.commands.registerCommand('lispython.runFile', runFile),
+        vscode.commands.registerCommand('lispython.startRepl', startRepl),
+        vscode.commands.registerCommand('lispython.sendToRepl', sendSelectionToRepl),
     );
 
     // Status bar

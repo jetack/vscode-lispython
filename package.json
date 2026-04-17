@@ -2,7 +2,7 @@
   "name": "vscode-lispython",
   "displayName": "LisPython",
   "description": "Language support for LisPython (.lpy) — a Lisp-like syntax for Python",
-  "version": "0.1.2",
+  "version": "0.2.0",
   "publisher": "jetack",
   "license": "MIT",
   "repository": {
@@ -28,6 +28,48 @@
       {
         "command": "lispython.restartServer",
         "title": "LisPython: Restart Language Server"
+      },
+      {
+        "command": "lispython.runFile",
+        "title": "LisPython: Run File",
+        "icon": "$(play)"
+      },
+      {
+        "command": "lispython.startRepl",
+        "title": "LisPython: Start REPL",
+        "icon": "$(terminal)"
+      },
+      {
+        "command": "lispython.sendToRepl",
+        "title": "LisPython: Send Selection/Line to REPL"
+      }
+    ],
+    "menus": {
+      "editor/title/run": [
+        {
+          "when": "resourceLangId == lispython",
+          "command": "lispython.runFile",
+          "group": "navigation@1"
+        },
+        {
+          "when": "resourceLangId == lispython",
+          "command": "lispython.startRepl",
+          "group": "navigation@2"
+        }
+      ],
+      "editor/context": [
+        {
+          "when": "resourceLangId == lispython",
+          "command": "lispython.sendToRepl",
+          "group": "lispython@1"
+        }
+      ]
+    },
+    "keybindings": [
+      {
+        "command": "lispython.sendToRepl",
+        "key": "shift+enter",
+        "when": "editorTextFocus && resourceLangId == lispython"
       }
     ],
     "languages": [
@@ -57,7 +99,12 @@
         "lispython.lsp.pythonPath": {
           "type": "string",
           "default": "python3",
-          "description": "Path to the Python interpreter that has lispython installed (used to launch lpy-lsp)."
+          "markdownDescription": "Python interpreter with `lispython` installed. The LSP server is launched as `<pythonPath> -m lispy.lsp`. Pick a Python that has the [lispython](https://pypi.org/project/lispython/) package installed (commonly a project's `.venv/bin/python`)."
+        },
+        "lispython.lpyPath": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Path to the `lpy` executable used by `Run File` and the REPL. If empty, looks next to the selected Python interpreter, then falls back to `lpy` on PATH."
         }
       }
     }
