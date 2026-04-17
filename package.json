@@ -1,0 +1,76 @@
+{
+  "name": "vsc-lispy",
+  "displayName": "LisPython",
+  "description": "Language support for LisPython (.lpy) — a Lisp-like syntax for Python",
+  "version": "0.1.0",
+  "publisher": "jetack",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.75.0"
+  },
+  "categories": [
+    "Programming Languages"
+  ],
+  "activationEvents": [
+    "onLanguage:lispython"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "lispython.selectPythonPath",
+        "title": "LisPython: Select Python Interpreter"
+      },
+      {
+        "command": "lispython.restartServer",
+        "title": "LisPython: Restart Language Server"
+      }
+    ],
+    "languages": [
+      {
+        "id": "lispython",
+        "aliases": [
+          "LisPython",
+          "lispython",
+          "lpy"
+        ],
+        "extensions": [
+          ".lpy"
+        ],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "lispython",
+        "scopeName": "source.lispython",
+        "path": "./syntaxes/lispython.tmLanguage.json"
+      }
+    ],
+    "configuration": {
+      "title": "LisPython",
+      "properties": {
+        "lispython.lsp.pythonPath": {
+          "type": "string",
+          "default": "python3",
+          "description": "Path to the Python interpreter that has lispython installed (used to launch lpy-lsp)."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "lint": "eslint src --ext ts"
+  },
+  "devDependencies": {
+    "@types/node": "^18.0.0",
+    "@types/vscode": "^1.75.0",
+    "@vscode/test-electron": "^2.3.0",
+    "typescript": "^5.3.0"
+  },
+  "dependencies": {
+    "vscode-languageclient": "^9.0.1"
+  }
+}

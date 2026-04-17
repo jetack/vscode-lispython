@@ -1,0 +1,353 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "LisPython",
+  "scopeName": "source.lispython",
+  "patterns": [
+    { "include": "#comment" },
+    { "include": "#string" },
+    { "include": "#quasiquote" },
+    { "include": "#unquote-splice" },
+    { "include": "#unquote" },
+    { "include": "#quote" },
+    { "include": "#number" },
+    { "include": "#constant" },
+    { "include": "#type-annotation" },
+    { "include": "#keyword-arg" },
+    { "include": "#starred" },
+    { "include": "#dot-method" },
+    { "include": "#sexp" },
+    { "include": "#brackets" },
+    { "include": "#braces" },
+    { "include": "#identifier" }
+  ],
+  "repository": {
+    "comment": {
+      "name": "comment.line.semicolon.lispython",
+      "match": ";.*$"
+    },
+    "string": {
+      "patterns": [
+        { "include": "#fstring-triple-double" },
+        { "include": "#fstring-double" },
+        { "include": "#triple-double-string" },
+        { "include": "#triple-single-string" },
+        { "include": "#double-string" }
+      ]
+    },
+    "fstring-triple-double": {
+      "name": "string.quoted.double.block.fstring.lispython",
+      "begin": "[fF]\"\"\"",
+      "beginCaptures": {
+        "0": { "name": "string.quoted.double.block.fstring.lispython" }
+      },
+      "end": "\"\"\"",
+      "patterns": [
+        { "include": "#string-escape" },
+        { "include": "#fstring-interpolation" }
+      ]
+    },
+    "fstring-double": {
+      "name": "string.quoted.double.fstring.lispython",
+      "begin": "[fF]\"",
+      "beginCaptures": {
+        "0": { "name": "string.quoted.double.fstring.lispython" }
+      },
+      "end": "\"",
+      "patterns": [
+        { "include": "#string-escape" },
+        { "include": "#fstring-interpolation" }
+      ]
+    },
+    "triple-double-string": {
+      "name": "string.quoted.double.block.lispython",
+      "begin": "([rRbB]{0,2})\"\"\"",
+      "beginCaptures": {
+        "1": { "name": "storage.type.string.lispython" }
+      },
+      "end": "\"\"\"",
+      "patterns": [
+        { "include": "#string-escape" }
+      ]
+    },
+    "triple-single-string": {
+      "name": "string.quoted.single.block.lispython",
+      "begin": "([rRbB]{0,2})'''",
+      "beginCaptures": {
+        "1": { "name": "storage.type.string.lispython" }
+      },
+      "end": "'''",
+      "patterns": [
+        { "include": "#string-escape" }
+      ]
+    },
+    "double-string": {
+      "name": "string.quoted.double.lispython",
+      "begin": "([rRbB]{0,2})\"",
+      "beginCaptures": {
+        "1": { "name": "storage.type.string.lispython" }
+      },
+      "end": "\"",
+      "patterns": [
+        { "include": "#string-escape" }
+      ]
+    },
+    "string-escape": {
+      "name": "constant.character.escape.lispython",
+      "match": "\\\\."
+    },
+    "fstring-interpolation": {
+      "name": "meta.interpolation.lispython",
+      "begin": "\\{",
+      "end": "\\}",
+      "beginCaptures": {
+        "0": { "name": "punctuation.definition.interpolation.begin.lispython" }
+      },
+      "endCaptures": {
+        "0": { "name": "punctuation.definition.interpolation.end.lispython" }
+      },
+      "patterns": [
+        { "include": "$self" }
+      ]
+    },
+    "number": {
+      "patterns": [
+        {
+          "name": "constant.numeric.hex.lispython",
+          "match": "(?<![\\w\\-])0[xX][0-9a-fA-F_]+[jJ]?\\b"
+        },
+        {
+          "name": "constant.numeric.oct.lispython",
+          "match": "(?<![\\w\\-])0[oO][0-7_]+[jJ]?\\b"
+        },
+        {
+          "name": "constant.numeric.bin.lispython",
+          "match": "(?<![\\w\\-])0[bB][01_]+[jJ]?\\b"
+        },
+        {
+          "name": "constant.numeric.float.lispython",
+          "match": "(?<![\\w\\-])(?:\\d[\\d_]*\\.(?:\\d[\\d_]*)?|\\.[\\d][\\d_]*)(?:[eE][+-]?\\d[\\d_]*)?[jJ]?\\b"
+        },
+        {
+          "name": "constant.numeric.scientific.lispython",
+          "match": "(?<![\\w\\-])\\d[\\d_]*[eE][+-]?\\d[\\d_]*[jJ]?\\b"
+        },
+        {
+          "name": "constant.numeric.integer.lispython",
+          "match": "(?<![\\w\\-])\\d[\\d_]*[jJ]?\\b"
+        }
+      ]
+    },
+    "constant": {
+      "name": "constant.language.lispython",
+      "match": "(?<![\\w\\-])(True|False|None|\\.\\.\\.)(?![\\w\\-])"
+    },
+    "type-annotation": {
+      "match": "\\^([a-zA-Z_][a-zA-Z0-9_\\-\\.]*)",
+      "captures": {
+        "0": { "name": "storage.type.annotation.lispython" }
+      }
+    },
+    "keyword-arg": {
+      "match": "(:)([a-zA-Z_][a-zA-Z0-9_\\-]*)",
+      "captures": {
+        "1": { "name": "punctuation.definition.keyword.lispython" },
+        "2": { "name": "entity.other.attribute-name.lispython" }
+      }
+    },
+    "starred": {
+      "match": "(\\*{1,2})([a-zA-Z_][a-zA-Z0-9_\\-]*)",
+      "captures": {
+        "1": { "name": "keyword.operator.unpacking.lispython" },
+        "2": { "name": "variable.parameter.lispython" }
+      }
+    },
+    "dot-method": {
+      "match": "(?<=\\s|\\()(\\.[a-zA-Z_][a-zA-Z0-9_\\-]*)(?=\\s|\\)|$)",
+      "captures": {
+        "1": { "name": "entity.name.function.method.lispython" }
+      }
+    },
+    "quote": {
+      "name": "keyword.operator.quote.lispython",
+      "match": "'(?=[\\(\\[a-zA-Z])"
+    },
+    "quasiquote": {
+      "name": "keyword.operator.quasiquote.lispython",
+      "match": "`(?=[\\(\\[a-zA-Z])"
+    },
+    "unquote-splice": {
+      "name": "keyword.operator.unquote-splice.lispython",
+      "match": "~@"
+    },
+    "unquote": {
+      "name": "keyword.operator.unquote.lispython",
+      "match": "~(?=[\\(\\[a-zA-Z])"
+    },
+    "sexp": {
+      "begin": "\\(",
+      "end": "\\)",
+      "beginCaptures": {
+        "0": { "name": "punctuation.paren.open.lispython" }
+      },
+      "endCaptures": {
+        "0": { "name": "punctuation.paren.close.lispython" }
+      },
+      "patterns": [
+        { "include": "#comment" },
+        { "include": "#string" },
+        { "include": "#sexp-head" },
+        { "include": "$self" }
+      ]
+    },
+    "sexp-head": {
+      "patterns": [
+        {
+          "comment": "Definition forms: def, async-def, class, defmacro",
+          "match": "(?<=\\()\\s*(def|async-def|class|defmacro)(?=[\\s\\)])",
+          "captures": {
+            "1": { "name": "keyword.control.definition.lispython" }
+          }
+        },
+        {
+          "comment": "Control flow forms",
+          "match": "(?<=\\()\\s*(if|while|for|async-for|do|match|try|with|async-with)(?=[\\s\\)])",
+          "captures": {
+            "1": { "name": "keyword.control.flow.lispython" }
+          }
+        },
+        {
+          "comment": "Import forms",
+          "match": "(?<=\\()\\s*(import|from|require)(?=[\\s\\)])",
+          "captures": {
+            "1": { "name": "keyword.control.import.lispython" }
+          }
+        },
+        {
+          "comment": "Assignment operators",
+          "match": "(?<=\\()\\s*(:=|\\+=|-=|\\*=|/=|//=|%=|\\*\\*=|<<=|>>=|\\|=|\\^=|&=|@=|=)(?=[\\s\\)])",
+          "captures": {
+            "1": { "name": "keyword.operator.assignment.lispython" }
+          }
+        },
+        {
+          "comment": "Keyword statement forms",
+          "match": "(?<=\\()\\s*(return|raise|assert|del|pass|break|continue|global|nonlocal|yield|yield-from|await)(?=[\\s\\)])",
+          "captures": {
+            "1": { "name": "keyword.control.statement.lispython" }
+          }
+        },
+        {
+          "comment": "Lambda and decorator forms",
+          "match": "(?<=\\()\\s*(deco|lambda|fn)(?=[\\s\\)])",
+          "captures": {
+            "1": { "name": "keyword.control.other.lispython" }
+          }
+        },
+        {
+          "comment": "Expression-level special forms",
+          "match": "(?<=\\()\\s*(ife|sub|,)(?=[\\s\\)])",
+          "captures": {
+            "1": { "name": "keyword.control.expression.lispython" }
+          }
+        },
+        {
+          "comment": "Built-in macros from sugar.lpy",
+          "match": "(?<=\\()\\s*(cond|conde|->|->>|comment|when|inc|dec|\\+\\+|--)(?=[\\s\\)])",
+          "captures": {
+            "1": { "name": "support.function.macro.lispython" }
+          }
+        },
+        {
+          "comment": "Boolean operators as head",
+          "match": "(?<=\\()\\s*(and|or|not)(?=[\\s\\)])",
+          "captures": {
+            "1": { "name": "keyword.operator.logical.lispython" }
+          }
+        },
+        {
+          "comment": "Comparison operators as head",
+          "match": "(?<=\\()\\s*(==|!=|<=|>=|<|>|is|is-not|in|not-in)(?=[\\s\\)])",
+          "captures": {
+            "1": { "name": "keyword.operator.comparison.lispython" }
+          }
+        },
+        {
+          "comment": "Arithmetic operators as head",
+          "match": "(?<=\\()\\s*(\\+\\+|--|\\*\\*|//|\\+|-|\\*|/|%|@)(?=[\\s\\)])",
+          "captures": {
+            "1": { "name": "keyword.operator.arithmetic.lispython" }
+          }
+        },
+        {
+          "comment": "Bitwise operators as head",
+          "match": "(?<=\\()\\s*(<<|>>|\\||\\^|&|~)(?=[\\s\\)])",
+          "captures": {
+            "1": { "name": "keyword.operator.bitwise.lispython" }
+          }
+        },
+        {
+          "comment": "Dot attribute access as head",
+          "match": "(?<=\\()\\s*(\\.)(?=[\\s])",
+          "captures": {
+            "1": { "name": "keyword.operator.accessor.lispython" }
+          }
+        },
+        {
+          "comment": "Dot-method call as head",
+          "match": "(?<=\\()\\s*(\\.[a-zA-Z_][a-zA-Z0-9_\\-]*)(?=[\\s\\)])",
+          "captures": {
+            "1": { "name": "entity.name.function.method.lispython" }
+          }
+        },
+        {
+          "comment": "Definition name (second token after def/class/defmacro)",
+          "match": "(?<=\\b(?:def|async-def|class|defmacro)\\s)\\s*([a-zA-Z_][a-zA-Z0-9_\\-]*)(?=[\\s\\[\\(])",
+          "captures": {
+            "1": { "name": "entity.name.function.lispython" }
+          }
+        },
+        {
+          "comment": "Generic function/macro call as head of sexp",
+          "match": "(?<=\\()\\s*([a-zA-Z_][a-zA-Z0-9_\\-\\.]*)(?=[\\s\\)])",
+          "captures": {
+            "1": { "name": "entity.name.function.call.lispython" }
+          }
+        }
+      ]
+    },
+    "brackets": {
+      "begin": "\\[",
+      "end": "\\]",
+      "beginCaptures": {
+        "0": { "name": "punctuation.bracket.open.lispython" }
+      },
+      "endCaptures": {
+        "0": { "name": "punctuation.bracket.close.lispython" }
+      },
+      "patterns": [
+        { "include": "#comment" },
+        { "include": "#string" },
+        { "include": "$self" }
+      ]
+    },
+    "braces": {
+      "begin": "\\{",
+      "end": "\\}",
+      "beginCaptures": {
+        "0": { "name": "punctuation.brace.open.lispython" }
+      },
+      "endCaptures": {
+        "0": { "name": "punctuation.brace.close.lispython" }
+      },
+      "patterns": [
+        { "include": "#comment" },
+        { "include": "#string" },
+        { "include": "$self" }
+      ]
+    },
+    "identifier": {
+      "name": "variable.other.lispython",
+      "match": "[a-zA-Z_][a-zA-Z0-9_\\-]*"
+    }
+  }
+}
