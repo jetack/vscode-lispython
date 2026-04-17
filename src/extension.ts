@@ -243,7 +243,7 @@ async function restartLspServer(): Promise<void> {
 // ---------------------------------------------------------------------------
 
 export async function activate(context: vscode.ExtensionContext) {
-    // Register commands
+    // Register commands FIRST so they work even if LSP fails to start
     context.subscriptions.push(
         vscode.commands.registerCommand('lispython.selectPythonPath', selectPythonPath),
         vscode.commands.registerCommand('lispython.restartServer', restartLspServer),
@@ -261,8 +261,14 @@ export async function activate(context: vscode.ExtensionContext) {
         })
     );
 
-    // Start LSP
-    await startLspServer();
+    // Start LSP (don't let failure break activation)
+    try {
+        await startLspServer();
+    } catch (err) {
+        vscode.window.showWarningMessage(
+            `LisPython LSP failed to start: ${err}. Click the status bar to select a Python interpreter with lispython installed.`
+        );
+    }
 }
 
 export function deactivate(): Thenable<void> | undefined {
