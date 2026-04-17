@@ -297,6 +297,176 @@ async function startRepl(): Promise<void> {
     terminal.show();
 }
 
+// --- S-expression finding ---
+
+const OPEN = new Set(['(', '[', '{']);
+const CLOSE = new Set([')', ']', '}']);
+
+/**
+ * Given the full source and a character offset, scan forward from `start`
+ * past whitespace/comments and find the end of the next s-expression.
+ * Returns the offset just after the sexp, or -1 if none.
+ */
+function sexpEndFrom(src: string, start: number): number {
+    let i = start;
+    // Skip whitespace and comments
+    while (i < src.length) {
+        const c = src[i];
+        if (c === ' ' || c === '\t' || c === '\n' || c === '\r') { i++; continue; }
+        if (c === ';') { while (i < src.length && src[i] !== '\n') i++; continue; }
+        break;
+    }
+    if (i >= src.length) return -1;
+
+    const c = src[i];
+
+    // String
+    if (c === '"') {
+        i++;
+        while (i < src.length) {
+            if (src[i] === '\\') { i += 2; continue; }
+            if (src[i] === '"') { i++; break; }
+            i++;
+        }
+        return i;
+    }
+
+    // Paren/bracket/brace form
+    if (OPEN.has(c)) {
+        const stack: string[] = [c];
+        i++;
+        while (i < src.length && stack.length > 0) {
+            const ch = src[i];
+            if (ch === ';') { while (i < src.length && src[i] !== '\n') i++; continue; }
+            if (ch === '"') {
+                i++;
+                while (i < src.length) {
+                    if (src[i] === '\\') { i += 2; continue; }
+                    if (src[i] === '"') { i++; break; }
+                    i++;
+                }
+                continue;
+            }
+            if (OPEN.has(ch)) { stack.push(ch); i++; continue; }
+            if (CLOSE.has(ch)) { stack.pop(); i++; continue; }
+            i++;
+        }
+        return i;
+    }
+
+    // Quote/quasiquote/unquote prefix — include it in the sexp
+    if (c === "'" || c === '`' || c === '~') {
+        i++;
+        if (src[i] === '@') i++; // unquote-splice ~@
+        return sexpEndFrom(src, i);
+    }
+
+    // Atom/symbol/number
+    while (i < src.length) {
+        const ch = src[i];
+        if (ch === ' ' || ch === '\t' || ch === '\n' || ch === '\r') break;
+        if (OPEN.has(ch) || CLOSE.has(ch)) break;
+        if (ch === ';') break;
+        i++;
+    }
+    return i;
+}
+
+/**
+ * Find the s-expression ending at or just before `offset`.
+ * Returns [start, end] or null.
+ */
+function lastSexpBefore(src: string, offset: number): [number, number] | null {
+    // Back up past trailing whitespace from the cursor
+    let end = offset;
+    while (end > 0) {
+        const c = src[end - 1];
+        if (c === ' ' || c === '\t' || c === '\n' || c === '\r') { end--; continue; }
+        break;
+    }
+    if (end === 0) return null;
+
+    // We need to find the start of the sexp that ends at `end`.
+    // Scan backward tracking paren balance in reverse.
+    let i = end - 1;
+    const stack: string[] = [];
+    let inString = false;
+
+    // If we're looking at a close-bracket, jump to its matching open
+    const last = src[i];
+    if (CLOSE.has(last)) {
+        stack.push(last);
+        i--;
+        while (i >= 0 && stack.length > 0) {
+            const ch = src[i];
+            if (ch === '"') {
+                // Walk back over string
+                i--;
+                while (i >= 0) {
+                    if (src[i] === '"' && (i === 0 || src[i - 1] !== '\\')) { i--; break; }
+                    i--;
+                }
+                continue;
+            }
+            if (CLOSE.has(ch)) { stack.push(ch); i--; continue; }
+            if (OPEN.has(ch)) { stack.pop(); i--; continue; }
+            i--;
+        }
+        let start = i + 1;
+        // Include meta-prefix (', `, ~, ~@) before the open-bracket
+        while (start > 0) {
+            const pc = src[start - 1];
+            if (pc === "'" || pc === '`' || pc === '~' || pc === '@') { start--; continue; }
+            break;
+        }
+        return [start, end];
+    }
+
+    // Close-quote: walk back to matching open-quote
+    if (last === '"') {
+        i--;
+        while (i >= 0) {
+            if (src[i] === '"' && (i === 0 || src[i - 1] !== '\\')) break;
+            i--;
+        }
+        return [i, end];
+    }
+
+    // Atom: walk back until whitespace or bracket
+    while (i >= 0) {
+        const ch = src[i];
+        if (ch === ' ' || ch === '\t' || ch === '\n' || ch === '\r') break;
+        if (OPEN.has(ch) || CLOSE.has(ch)) break;
+        i--;
+    }
+    return [i + 1, end];
+}
+
+/**
+ * Find the outermost (top-level) s-expression containing the given offset.
+ * Returns [start, end] of the form, or null if none.
+ */
+function topLevelSexpAt(src: string, offset: number): [number, number] | null {
+    // Parse from start tracking top-level forms; find the one containing offset.
+    let i = 0;
+    while (i < src.length) {
+        // Skip whitespace and comments
+        const c = src[i];
+        if (c === ' ' || c === '\t' || c === '\n' || c === '\r') { i++; continue; }
+        if (c === ';') { while (i < src.length && src[i] !== '\n') i++; continue; }
+
+        const start = i;
+        const end = sexpEndFrom(src, i);
+        if (end < 0 || end === i) { i++; continue; }
+
+        if (offset >= start && offset <= end) {
+            return [start, end];
+        }
+        i = end;
+    }
+    return null;
+}
+
 async function sendSelectionToRepl(): Promise<void> {
     const editor = vscode.window.activeTextEditor;
     if (!editor || editor.document.languageId !== 'lispython') {
@@ -305,19 +475,64 @@ async function sendSelectionToRepl(): Promise<void> {
     }
 
     const selection = editor.selection;
-    let text: string;
-    if (selection.isEmpty) {
-        // Send current line if nothing selected
-        text = editor.document.lineAt(selection.active.line).text;
-    } else {
-        text = editor.document.getText(selection);
+    if (!selection.isEmpty) {
+        const text = editor.document.getText(selection);
+        if (!text.trim()) return;
+        sendTextToRepl(text);
+        return;
     }
 
-    if (!text.trim()) return;
+    vscode.window.showWarningMessage(
+        'No selection. Use "Send Last S-Expression" or "Send Top-Level Form" instead.'
+    );
+}
 
+async function sendLastSexp(): Promise<void> {
+    const editor = vscode.window.activeTextEditor;
+    if (!editor || editor.document.languageId !== 'lispython') return;
+
+    const src = editor.document.getText();
+    const offset = editor.document.offsetAt(editor.selection.active);
+    const range = lastSexpBefore(src, offset);
+    if (!range) {
+        vscode.window.showInformationMessage('No s-expression before cursor.');
+        return;
+    }
+    const text = src.slice(range[0], range[1]);
+    sendTextToRepl(text);
+    flashRange(editor, range);
+}
+
+async function sendTopLevelForm(): Promise<void> {
+    const editor = vscode.window.activeTextEditor;
+    if (!editor || editor.document.languageId !== 'lispython') return;
+
+    const src = editor.document.getText();
+    const offset = editor.document.offsetAt(editor.selection.active);
+    const range = topLevelSexpAt(src, offset);
+    if (!range) {
+        vscode.window.showInformationMessage('No top-level form at cursor.');
+        return;
+    }
+    const text = src.slice(range[0], range[1]);
+    sendTextToRepl(text);
+    flashRange(editor, range);
+}
+
+function sendTextToRepl(text: string): void {
     const terminal = getOrCreateReplTerminal();
-    terminal.show(true); // preserveFocus so cursor stays in editor
+    terminal.show(true);
     terminal.sendText(text);
+}
+
+function flashRange(editor: vscode.TextEditor, range: [number, number]): void {
+    const start = editor.document.positionAt(range[0]);
+    const end = editor.document.positionAt(range[1]);
+    const deco = vscode.window.createTextEditorDecorationType({
+        backgroundColor: new vscode.ThemeColor('editor.findMatchHighlightBackground'),
+    });
+    editor.setDecorations(deco, [new vscode.Range(start, end)]);
+    setTimeout(() => deco.dispose(), 200);
 }
 
 // ---------------------------------------------------------------------------
@@ -332,6 +547,8 @@ export async function activate(context: vscode.ExtensionContext) {
         vscode.commands.registerCommand('lispython.runFile', runFile),
         vscode.commands.registerCommand('lispython.startRepl', startRepl),
         vscode.commands.registerCommand('lispython.sendToRepl', sendSelectionToRepl),
+        vscode.commands.registerCommand('lispython.sendLastSexp', sendLastSexp),
+        vscode.commands.registerCommand('lispython.sendTopLevelForm', sendTopLevelForm),
     );
 
     // Status bar

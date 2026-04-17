@@ -2,7 +2,7 @@
   "name": "vscode-lispython",
   "displayName": "LisPython",
   "description": "Language support for LisPython (.lpy) — a Lisp-like syntax for Python",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "publisher": "jetack",
   "license": "MIT",
   "repository": {
@@ -41,7 +41,15 @@
       },
       {
         "command": "lispython.sendToRepl",
-        "title": "LisPython: Send Selection/Line to REPL"
+        "title": "LisPython: Send Selection to REPL"
+      },
+      {
+        "command": "lispython.sendLastSexp",
+        "title": "LisPython: Send Last S-Expression to REPL"
+      },
+      {
+        "command": "lispython.sendTopLevelForm",
+        "title": "LisPython: Send Top-Level Form to REPL"
       }
     ],
     "menus": {
@@ -59,16 +67,36 @@
       ],
       "editor/context": [
         {
-          "when": "resourceLangId == lispython",
+          "when": "resourceLangId == lispython && editorHasSelection",
           "command": "lispython.sendToRepl",
           "group": "lispython@1"
+        },
+        {
+          "when": "resourceLangId == lispython",
+          "command": "lispython.sendLastSexp",
+          "group": "lispython@2"
+        },
+        {
+          "when": "resourceLangId == lispython",
+          "command": "lispython.sendTopLevelForm",
+          "group": "lispython@3"
         }
       ]
     },
     "keybindings": [
       {
+        "command": "lispython.sendLastSexp",
+        "key": "ctrl+enter",
+        "when": "editorTextFocus && resourceLangId == lispython && !editorHasSelection"
+      },
+      {
         "command": "lispython.sendToRepl",
-        "key": "shift+enter",
+        "key": "ctrl+enter",
+        "when": "editorTextFocus && resourceLangId == lispython && editorHasSelection"
+      },
+      {
+        "command": "lispython.sendTopLevelForm",
+        "key": "ctrl+alt+enter",
         "when": "editorTextFocus && resourceLangId == lispython"
       }
     ],
