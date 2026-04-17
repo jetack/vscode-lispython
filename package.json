@@ -2,7 +2,7 @@
   "name": "vscode-lispython",
   "displayName": "LisPython",
   "description": "Language support for LisPython (.lpy) — a Lisp-like syntax for Python",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "publisher": "jetack",
   "license": "MIT",
   "repository": {
