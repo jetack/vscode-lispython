@@ -36,28 +36,42 @@
       ]
     },
     "fstring-triple-double": {
-      "name": "string.quoted.double.block.fstring.lispython",
+      "name": "meta.fstring.block.lispython",
       "begin": "[fF]\"\"\"",
       "beginCaptures": {
-        "0": { "name": "string.quoted.double.block.fstring.lispython" }
+        "0": { "name": "string.quoted.double.block.fstring.lispython punctuation.definition.string.begin.lispython" }
+      },
+      "endCaptures": {
+        "0": { "name": "string.quoted.double.block.fstring.lispython punctuation.definition.string.end.lispython" }
       },
       "end": "\"\"\"",
       "patterns": [
-        { "include": "#string-escape" },
-        { "include": "#fstring-interpolation" }
+        { "include": "#fstring-interpolation" },
+        { "include": "#fstring-block-text" }
       ]
     },
+    "fstring-block-text": {
+      "name": "string.quoted.double.block.fstring.lispython",
+      "match": "(?:\\\\.|[^\"{\\\\])+"
+    },
     "fstring-double": {
-      "name": "string.quoted.double.fstring.lispython",
+      "name": "meta.fstring.lispython",
       "begin": "[fF]\"",
       "beginCaptures": {
-        "0": { "name": "string.quoted.double.fstring.lispython" }
+        "0": { "name": "string.quoted.double.fstring.lispython punctuation.definition.string.begin.lispython" }
+      },
+      "endCaptures": {
+        "0": { "name": "string.quoted.double.fstring.lispython punctuation.definition.string.end.lispython" }
       },
       "end": "\"",
       "patterns": [
-        { "include": "#string-escape" },
-        { "include": "#fstring-interpolation" }
+        { "include": "#fstring-interpolation" },
+        { "include": "#fstring-text" }
       ]
+    },
+    "fstring-text": {
+      "name": "string.quoted.double.fstring.lispython",
+      "match": "(?:\\\\.|[^\"{\\\\])+"
     },
     "triple-double-string": {
       "name": "string.quoted.double.block.lispython",
