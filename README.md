@@ -56,9 +56,9 @@ LisPython is a Lisp-like syntax layer for Python — 100% compatible with Python
 (require lispy.macros *)
 
 (def fib [n]
-  (if (< n 2)
-      n
-      (+ (fib (- n 1)) (fib (- n 2)))))
+  (return (ife (< n 2)
+               n
+               (+ (fib (- n 1)) (fib (- n 2))))))
 
 (defmacro when [condition *body]
   (return `(if ~condition (do ~@body))))
