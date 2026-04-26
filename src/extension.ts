@@ -605,13 +605,17 @@ function getOrCreateReplPanel(): vscode.WebviewPanel {
     nreplPanel.webview.html = getReplHtml();
     nreplPanel.webview.onDidReceiveMessage(async (msg) => {
         if (msg.type === 'openFile' && msg.file && msg.line) {
-            const uri = vscode.Uri.file(msg.file);
-            const line = Math.max(0, msg.line - 1);
-            const doc = await vscode.workspace.openTextDocument(uri);
-            const editor = await vscode.window.showTextDocument(doc, vscode.ViewColumn.One);
-            const pos = new vscode.Position(line, 0);
-            editor.selection = new vscode.Selection(pos, pos);
-            editor.revealRange(new vscode.Range(pos, pos), vscode.TextEditorRevealType.InCenter);
+            try {
+                const uri = vscode.Uri.file(msg.file);
+                const line = Math.max(0, msg.line - 1);
+                const doc = await vscode.workspace.openTextDocument(uri);
+                const editor = await vscode.window.showTextDocument(doc, vscode.ViewColumn.One);
+                const pos = new vscode.Position(line, 0);
+                editor.selection = new vscode.Selection(pos, pos);
+                editor.revealRange(new vscode.Range(pos, pos), vscode.TextEditorRevealType.InCenter);
+            } catch {
+                vscode.window.showWarningMessage(`Could not open file: ${msg.file}`);
+            }
         }
     });
     nreplPanel.onDidDispose(() => { nreplPanel = undefined; });
