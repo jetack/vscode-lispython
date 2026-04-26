@@ -1,7 +1,8 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
 import * as fs from 'fs';
-import { execFile } from 'child_process';
+import * as net from 'net';
+import { execFile, ChildProcess, spawn } from 'child_process';
 import {
     CloseAction,
     ErrorAction,
@@ -499,7 +500,11 @@ async function sendSelectionToRepl(): Promise<void> {
     if (!selection.isEmpty) {
         const text = editor.document.getText(selection);
         if (!text.trim()) return;
-        sendTextToRepl(text);
+        const range: [number, number] = [
+            editor.document.offsetAt(selection.start),
+            editor.document.offsetAt(selection.end),
+        ];
+        sendTextToRepl(text, editor, range);
         return;
     }
 
@@ -520,7 +525,7 @@ async function sendLastSexp(): Promise<void> {
         return;
     }
     const text = src.slice(range[0], range[1]);
-    sendTextToRepl(text);
+    sendTextToRepl(text, editor, range);
     flashRange(editor, range);
 }
 
@@ -536,14 +541,18 @@ async function sendTopLevelForm(): Promise<void> {
         return;
     }
     const text = src.slice(range[0], range[1]);
-    sendTextToRepl(text);
+    sendTextToRepl(text, editor, range);
     flashRange(editor, range);
 }
 
-function sendTextToRepl(text: string): void {
-    const terminal = getOrCreateReplTerminal();
-    terminal.show(true);
-    terminal.sendText(text);
+async function sendTextToRepl(text: string, editor?: vscode.TextEditor, range?: [number, number]): Promise<void> {
+    if (!editor || !range) return;
+    if (!nreplSocket || nreplSocket.destroyed) {
+        await startNrepl();
+    }
+    if (nreplSocket && !nreplSocket.destroyed) {
+        evalAndShow(text, editor, range);
+    }
 }
 
 function flashRange(editor: vscode.TextEditor, range: [number, number]): void {
@@ -554,6 +563,550 @@ function flashRange(editor: vscode.TextEditor, range: [number, number]): void {
     });
     editor.setDecorations(deco, [new vscode.Range(start, end)]);
     setTimeout(() => deco.dispose(), 200);
+}
+
+// ---------------------------------------------------------------------------
+// nREPL client
+// ---------------------------------------------------------------------------
+
+let nreplSocket: net.Socket | undefined;
+let nreplProcess: ChildProcess | undefined;
+let nreplOutputChannel: vscode.OutputChannel | undefined;
+let nreplStatusItem: vscode.StatusBarItem | undefined;
+
+const resultDecorationType = vscode.window.createTextEditorDecorationType({
+    after: {
+        margin: '0 0 0 1em',
+        fontStyle: 'italic',
+    },
+    isWholeLine: false,
+});
+
+let nreplPanel: vscode.WebviewPanel | undefined;
+
+function getNreplOutputChannel(): vscode.OutputChannel {
+    if (!nreplOutputChannel) {
+        nreplOutputChannel = vscode.window.createOutputChannel('LisPython nREPL');
+    }
+    return nreplOutputChannel;
+}
+
+function getOrCreateReplPanel(): vscode.WebviewPanel {
+    if (nreplPanel) {
+        return nreplPanel;
+    }
+    nreplPanel = vscode.window.createWebviewPanel(
+        'lispythonRepl',
+        'LisPython REPL',
+        { viewColumn: vscode.ViewColumn.Two, preserveFocus: true },
+        { enableScripts: true, retainContextWhenHidden: true },
+    );
+    nreplPanel.webview.html = getReplHtml();
+    nreplPanel.onDidDispose(() => { nreplPanel = undefined; });
+    return nreplPanel;
+}
+
+function appendToReplPanel(code: string, result: { value?: string | null; stdout?: string; error?: string | null }): void {
+    const panel = getOrCreateReplPanel();
+    panel.webview.postMessage({ type: 'eval', code, result });
+}
+
+function getReplHtml(): string {
+    return `<!DOCTYPE html>
+<html>
+<head>
+<style>
+  body {
+    font-family: var(--vscode-editor-font-family, monospace);
+    font-size: var(--vscode-editor-font-size, 13px);
+    padding: 8px;
+    color: var(--vscode-editor-foreground);
+    background: var(--vscode-editor-background);
+  }
+  .entry { margin-bottom: 12px; border-bottom: 1px solid var(--vscode-editorGroup-border); padding-bottom: 8px; }
+  .code { color: var(--vscode-textPreformat-foreground); white-space: pre-wrap; }
+  .prompt { color: var(--vscode-descriptionForeground); }
+  .value { color: var(--vscode-debugTokenExpression-number); white-space: pre-wrap; }
+  .stdout { color: var(--vscode-terminal-ansiGreen); white-space: pre-wrap; }
+  .error { color: var(--vscode-errorForeground); white-space: pre-wrap; }
+  #entries { overflow-y: auto; }
+</style>
+</head>
+<body>
+<div id="entries"></div>
+<script>
+  const entries = document.getElementById('entries');
+  window.addEventListener('message', (e) => {
+    const { type, code, result } = e.data;
+    if (type === 'clear') { entries.innerHTML = ''; return; }
+    if (type !== 'eval') return;
+    const div = document.createElement('div');
+    div.className = 'entry';
+
+    let html = '<span class="prompt">repl&gt; </span><span class="code">' + escapeHtml(code) + '</span>';
+
+    if (result.stdout) {
+      html += '<br><span class="stdout">' + escapeHtml(result.stdout.replace(/\\n$/, '')) + '</span>';
+    }
+    if (result.error) {
+      html += '<br><span class="error">' + escapeHtml(result.error) + '</span>';
+    } else if (result.value && result.value !== 'None') {
+      html += '<br><span class="value">' + escapeHtml(result.value) + '</span>';
+    }
+
+    div.innerHTML = html;
+    entries.appendChild(div);
+    div.scrollIntoView({ behavior: 'smooth' });
+  });
+
+  function escapeHtml(s) {
+    return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  }
+</script>
+</body>
+</html>`;
+}
+
+function updateNreplStatus(connected: boolean): void {
+    if (!nreplStatusItem) {
+        nreplStatusItem = vscode.window.createStatusBarItem(
+            vscode.StatusBarAlignment.Right, 99
+        );
+        nreplStatusItem.command = 'lispython.startNrepl';
+    }
+    if (connected) {
+        nreplStatusItem.text = '$(plug) nREPL';
+        nreplStatusItem.tooltip = 'LisPython nREPL connected. Click to restart.';
+        nreplStatusItem.color = new vscode.ThemeColor('statusBarItem.prominentForeground');
+    } else {
+        nreplStatusItem.text = '$(debug-disconnect) nREPL';
+        nreplStatusItem.tooltip = 'LisPython nREPL disconnected. Click to start.';
+        nreplStatusItem.color = undefined;
+    }
+    nreplStatusItem.show();
+}
+
+function connectNrepl(port: number): Promise<void> {
+    return new Promise((resolve, reject) => {
+        if (nreplSocket) {
+            nreplSocket.destroy();
+            nreplSocket = undefined;
+        }
+        const sock = new net.Socket();
+        sock.connect(port, '127.0.0.1', () => {
+            nreplSocket = sock;
+            updateNreplStatus(true);
+            getNreplOutputChannel().appendLine(`Connected to nREPL on port ${port}`);
+            resolve();
+        });
+        sock.on('error', (err) => {
+            updateNreplStatus(false);
+            reject(err);
+        });
+        sock.on('close', () => {
+            nreplSocket = undefined;
+            updateNreplStatus(false);
+        });
+    });
+}
+
+function disconnectNrepl(): Promise<void> {
+    if (nreplSocket) {
+        nreplSocket.destroy();
+        nreplSocket = undefined;
+    }
+    const proc = nreplProcess;
+    nreplProcess = undefined;
+    updateNreplStatus(false);
+    if (!proc || proc.exitCode !== null) {
+        return Promise.resolve();
+    }
+    return new Promise((resolve) => {
+        proc.on('exit', () => resolve());
+        proc.kill('SIGTERM');
+        // Force kill after 2 seconds if still alive
+        setTimeout(() => {
+            try { proc.kill('SIGKILL'); } catch {}
+            resolve();
+        }, 2000);
+    });
+}
+
+async function startNrepl(): Promise<void> {
+    await disconnectNrepl();
+    if (nreplPanel) {
+        nreplPanel.webview.postMessage({ type: 'clear' });
+    }
+
+    const lpy = getLpyCommand();
+    const cwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? process.cwd();
+
+    const out = getNreplOutputChannel();
+    out.show(true);
+    out.appendLine(`Starting nREPL server: ${lpy} --nrepl`);
+
+    nreplProcess = spawn(lpy, ['--nrepl'], { cwd });
+
+    // Parse port from stdout: "nREPL server started on 127.0.0.1:PORT"
+    const portPromise = new Promise<number>((resolve, reject) => {
+        const timeout = setTimeout(() => reject(new Error('nREPL server did not start in time')), 10000);
+        nreplProcess!.stdout?.on('data', (data: Buffer) => {
+            const text = data.toString();
+            out.append(text);
+            const match = text.match(/started on .+:(\d+)/);
+            if (match) {
+                clearTimeout(timeout);
+                resolve(parseInt(match[1], 10));
+            }
+        });
+        nreplProcess!.on('exit', () => {
+            clearTimeout(timeout);
+            reject(new Error('nREPL server exited before starting'));
+        });
+    });
+
+    nreplProcess.stderr?.on('data', (data: Buffer) => {
+        out.append(data.toString());
+    });
+    nreplProcess.on('exit', (code) => {
+        out.appendLine(`nREPL server exited (code ${code})`);
+        nreplProcess = undefined;
+        updateNreplStatus(false);
+    });
+
+    try {
+        const port = await portPromise;
+        await connectNrepl(port);
+        out.appendLine(`Connected on port ${port}`);
+    } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        vscode.window.showErrorMessage(msg);
+    }
+}
+
+function nreplEval(code: string): Promise<{ value?: string; stdout?: string; error?: string }> {
+    return nreplRequest({ op: 'eval', code });
+}
+
+/** Send an arbitrary JSON request to the nREPL and return the parsed response. */
+function nreplRequest(msg: Record<string, unknown>): Promise<any> {
+    return new Promise((resolve, reject) => {
+        if (!nreplSocket || nreplSocket.destroyed) {
+            reject(new Error('nREPL not connected'));
+            return;
+        }
+
+        let buf = '';
+        const onData = (data: Buffer) => {
+            buf += data.toString();
+            const newlineIdx = buf.indexOf('\n');
+            if (newlineIdx >= 0) {
+                nreplSocket!.removeListener('data', onData);
+                try {
+                    resolve(JSON.parse(buf.slice(0, newlineIdx)));
+                } catch (e) {
+                    reject(e);
+                }
+            }
+        };
+        nreplSocket.on('data', onData);
+        nreplSocket.write(JSON.stringify(msg) + '\n');
+    });
+}
+
+async function evalAndShow(code: string, editor: vscode.TextEditor, range: [number, number]): Promise<void> {
+    try {
+        const result = await nreplEval(code);
+        appendToReplPanel(code, result);
+
+        // Also show inline decoration briefly
+        const parts: string[] = [];
+        if (result.error) {
+            parts.push(`Error: ${result.error}`);
+        } else if (result.value && result.value !== 'None') {
+            parts.push(result.value);
+        } else if (result.stdout) {
+            parts.push(result.stdout.trimEnd());
+        }
+
+        if (parts.length > 0) {
+            const msg = parts.join(' | ');
+            const endPos = editor.document.positionAt(range[1]);
+            const line = endPos.line;
+            const lineEnd = editor.document.lineAt(line).range.end;
+
+            const color = result.error
+                ? new vscode.ThemeColor('errorForeground')
+                : new vscode.ThemeColor('editorInfo.foreground');
+
+            const decoration: vscode.DecorationOptions = {
+                range: new vscode.Range(lineEnd, lineEnd),
+                renderOptions: {
+                    after: {
+                        contentText: ` => ${msg}`,
+                        color,
+                    },
+                },
+            };
+            editor.setDecorations(resultDecorationType, [decoration]);
+
+            setTimeout(() => {
+                if (vscode.window.activeTextEditor === editor) {
+                    editor.setDecorations(resultDecorationType, []);
+                }
+            }, 5000);
+        }
+    } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        vscode.window.showErrorMessage(`nREPL eval failed: ${msg}`);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Load File command
+// ---------------------------------------------------------------------------
+
+async function loadFileToRepl(): Promise<void> {
+    const editor = vscode.window.activeTextEditor;
+    if (!editor || editor.document.languageId !== 'lispython') {
+        vscode.window.showErrorMessage('No LisPython file is active.');
+        return;
+    }
+
+    if (editor.document.isDirty) {
+        await editor.document.save();
+    }
+
+    const filePath = editor.document.uri.fsPath;
+
+    // Auto-start nREPL if not connected
+    if (!nreplSocket || nreplSocket.destroyed) {
+        await startNrepl();
+    }
+    if (!nreplSocket || nreplSocket.destroyed) {
+        vscode.window.showErrorMessage('Could not connect to nREPL.');
+        return;
+    }
+
+    try {
+        const result = await nreplRequest({ op: 'load-file', path: filePath });
+        appendToReplPanel(`(load-file "${path.basename(filePath)}")`, {
+            value: result.value,
+            stdout: result.stdout,
+            error: result.error,
+        });
+    } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        vscode.window.showErrorMessage(`nREPL load-file failed: ${msg}`);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Macroexpand command
+// ---------------------------------------------------------------------------
+
+async function macroexpand(): Promise<void> {
+    const editor = vscode.window.activeTextEditor;
+    if (!editor || editor.document.languageId !== 'lispython') {
+        vscode.window.showErrorMessage('No LisPython file is active.');
+        return;
+    }
+
+    const src = editor.document.getText();
+    const offset = editor.document.offsetAt(editor.selection.active);
+
+    // Try top-level form first, then fall back to last sexp before cursor
+    const range = topLevelSexpAt(src, offset) ?? lastSexpBefore(src, offset);
+    if (!range) {
+        vscode.window.showInformationMessage('No s-expression at cursor.');
+        return;
+    }
+
+    const code = src.slice(range[0], range[1]);
+    flashRange(editor, range);
+
+    // Auto-start nREPL if not connected
+    if (!nreplSocket || nreplSocket.destroyed) {
+        await startNrepl();
+    }
+    if (!nreplSocket || nreplSocket.destroyed) {
+        vscode.window.showErrorMessage('Could not connect to nREPL.');
+        return;
+    }
+
+    try {
+        const result = await nreplRequest({ op: 'macroexpand', code });
+        appendToReplPanel(`(macroexpand '${code})`, {
+            value: result.expansion,
+            error: result.error,
+        });
+    } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        vscode.window.showErrorMessage(`nREPL macroexpand failed: ${msg}`);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Completion provider (nREPL-backed)
+// ---------------------------------------------------------------------------
+
+class NreplCompletionProvider implements vscode.CompletionItemProvider {
+    async provideCompletionItems(
+        document: vscode.TextDocument,
+        position: vscode.Position,
+        _token: vscode.CancellationToken,
+    ): Promise<vscode.CompletionItem[] | undefined> {
+        // Only provide completions when nREPL is connected
+        if (!nreplSocket || nreplSocket.destroyed) {
+            return undefined;
+        }
+
+        // Extract the prefix: walk backwards from cursor over symbol characters
+        const lineText = document.lineAt(position.line).text;
+        let start = position.character;
+        while (start > 0) {
+            const ch = lineText[start - 1];
+            if (/[\s()\[\]{}'`,;"]/.test(ch)) break;
+            start--;
+        }
+        const prefix = lineText.slice(start, position.character);
+        if (!prefix) return undefined;
+
+        try {
+            const result = await nreplRequest({ op: 'complete', prefix });
+            if (!result.completions || !Array.isArray(result.completions)) {
+                return undefined;
+            }
+            return result.completions.map((name: string) => {
+                const item = new vscode.CompletionItem(name, vscode.CompletionItemKind.Function);
+                // Replace the prefix range so the completion replaces what was typed
+                item.range = new vscode.Range(
+                    position.line, start,
+                    position.line, position.character,
+                );
+                return item;
+            });
+        } catch {
+            return undefined;
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Auto-indent on Enter (bracket-depth aware)
+// ---------------------------------------------------------------------------
+
+const SPECIAL_FORMS = new Set([
+    'def', 'defn', 'defmacro', 'async-def',
+    'if', 'cond', 'conde', 'when', 'unless',
+    'while', 'for', 'async-for',
+    'do', 'try', 'with', 'async-with',
+    'class', 'deco',
+    'lambda', 'fn',
+    'let', 'match', 'case',
+    'except', 'except*', 'finally', 'else',
+]);
+
+function calcIndent(text: string): number {
+    let inString = false;
+    const stack: number[] = [];
+    let i = 0;
+    const n = text.length;
+
+    while (i < n) {
+        const c = text[i];
+        if (inString) {
+            if (c === '\\') { i += 2; continue; }
+            if (c === '"') { inString = false; }
+            i++; continue;
+        }
+        if (c === '"') { inString = true; i++; continue; }
+        if (c === ';') { while (i < n && text[i] !== '\n') i++; continue; }
+
+        if (c === '(' || c === '[' || c === '{') {
+            const parenCol = colOf(text, i);
+
+            // For [ and {: align to first element
+            if (c !== '(') {
+                let j = i + 1;
+                while (j < n && text[j] === ' ') j++;
+                if (j < n && text[j] !== '\n') {
+                    stack.push(colOf(text, j));
+                } else {
+                    stack.push(parenCol + 1);
+                }
+            } else {
+                // For (: special form vs function call
+                let j = i + 1;
+                while (j < n && text[j] === ' ') j++;
+                const opStart = j;
+                while (j < n && !' \n\t()[]{}\'\"'.includes(text[j])) j++;
+                const op = text.slice(opStart, j);
+
+                if (op === '' || SPECIAL_FORMS.has(op)) {
+                    stack.push(parenCol + 2);
+                } else {
+                    let argPos = j;
+                    while (argPos < n && text[argPos] === ' ') argPos++;
+                    if (argPos < n && text[argPos] !== '\n') {
+                        stack.push(colOf(text, argPos));
+                    } else {
+                        stack.push(parenCol + 2);
+                    }
+                }
+            }
+        } else if (c === ')' || c === ']' || c === '}') {
+            if (stack.length > 0) stack.pop();
+        }
+        i++;
+    }
+    return stack.length > 0 ? stack[stack.length - 1] : 0;
+}
+
+function colOf(text: string, pos: number): number {
+    const nl = text.lastIndexOf('\n', pos - 1);
+    return pos - nl - 1;
+}
+
+async function newlineAndIndent(): Promise<void> {
+    const editor = vscode.window.activeTextEditor;
+    if (!editor) return;
+    const pos = editor.selection.active;
+    const textBefore = editor.document.getText(new vscode.Range(0, 0, pos.line, pos.character));
+    const indent = calcIndent(textBefore);
+    const newText = '\n' + ' '.repeat(indent);
+    // Consume whitespace after cursor
+    const lineText = editor.document.lineAt(pos.line).text;
+    let end = pos.character;
+    while (end < lineText.length && lineText[end] === ' ') end++;
+    await editor.edit((edit) => {
+        edit.replace(new vscode.Range(pos.line, pos.character, pos.line, end), newText);
+    });
+    const newPos = new vscode.Position(pos.line + 1, indent);
+    editor.selection = new vscode.Selection(newPos, newPos);
+}
+
+async function reindentLines(): Promise<void> {
+    const editor = vscode.window.activeTextEditor;
+    if (!editor) return;
+    const sel = editor.selection;
+    const startLine = sel.start.line;
+    const endLine = sel.isEmpty ? startLine : sel.end.line;
+
+    await editor.edit((edit) => {
+        for (let line = startLine; line <= endLine; line++) {
+            const textBefore = editor.document.getText(new vscode.Range(0, 0, line, 0));
+            const indent = calcIndent(textBefore);
+            const lineObj = editor.document.lineAt(line);
+            const oldIndent = lineObj.firstNonWhitespaceCharacterIndex;
+            if (oldIndent !== indent) {
+                edit.replace(
+                    new vscode.Range(line, 0, line, oldIndent),
+                    ' '.repeat(indent),
+                );
+            }
+        }
+    });
 }
 
 // ---------------------------------------------------------------------------
@@ -570,10 +1123,31 @@ export async function activate(context: vscode.ExtensionContext) {
         vscode.commands.registerCommand('lispython.sendToRepl', sendSelectionToRepl),
         vscode.commands.registerCommand('lispython.sendLastSexp', sendLastSexp),
         vscode.commands.registerCommand('lispython.sendTopLevelForm', sendTopLevelForm),
+        vscode.commands.registerCommand('lispython.startNrepl', startNrepl),
+        vscode.commands.registerCommand('lispython.disconnectNrepl', disconnectNrepl),
+        vscode.commands.registerCommand('lispython.loadFileToRepl', loadFileToRepl),
+        vscode.commands.registerCommand('lispython.macroexpand', macroexpand),
+    );
+
+    // Completion provider (nREPL-backed)
+    context.subscriptions.push(
+        vscode.languages.registerCompletionItemProvider(
+            { language: 'lispython', scheme: 'file' },
+            new NreplCompletionProvider(),
+            '.',
+        ),
+    );
+
+    // Auto-indent
+    context.subscriptions.push(
+        vscode.commands.registerCommand('lispython.newlineAndIndent', newlineAndIndent),
+        vscode.commands.registerCommand('lispython.reindentLines', reindentLines),
     );
 
     // Status bar
     createStatusBar(context);
+    updateNreplStatus(false);
+    context.subscriptions.push(nreplStatusItem!);
 
     // Watch for config changes
     context.subscriptions.push(
@@ -601,5 +1175,8 @@ export async function activate(context: vscode.ExtensionContext) {
 }
 
 export function deactivate(): Thenable<void> | undefined {
+    disconnectNrepl();
+    nreplStatusItem?.dispose();
+    nreplOutputChannel?.dispose();
     return stopLspServer();
 }
