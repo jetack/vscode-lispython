@@ -19,16 +19,7 @@
   "extensionKind": [
     "workspace"
   ],
-  "activationEvents": [
-    "onLanguage:lispython",
-    "onCommand:lispython.selectPythonPath",
-    "onCommand:lispython.restartServer",
-    "onCommand:lispython.runFile",
-    "onCommand:lispython.startRepl",
-    "onCommand:lispython.sendToRepl",
-    "onCommand:lispython.sendLastSexp",
-    "onCommand:lispython.sendTopLevelForm"
-  ],
+  "activationEvents": [],
   "contributes": {
     "commands": [
       {
@@ -60,6 +51,27 @@
       {
         "command": "lispython.sendTopLevelForm",
         "title": "LisPython: Send Top-Level Form to REPL"
+      },
+      {
+        "command": "lispython.startNrepl",
+        "title": "LisPython: Start nREPL Server",
+        "icon": "$(server-process)"
+      },
+      {
+        "command": "lispython.disconnectNrepl",
+        "title": "LisPython: Disconnect nREPL"
+      },
+      {
+        "command": "lispython.reindentLines",
+        "title": "LisPython: Re-indent Line/Selection"
+      },
+      {
+        "command": "lispython.loadFileToRepl",
+        "title": "LisPython: Load File into REPL"
+      },
+      {
+        "command": "lispython.macroexpand",
+        "title": "LisPython: Macroexpand Form at Cursor"
       }
     ],
     "menus": {
@@ -108,6 +120,26 @@
         "command": "lispython.sendTopLevelForm",
         "key": "ctrl+alt+enter",
         "when": "editorTextFocus && resourceLangId == lispython"
+      },
+      {
+        "command": "lispython.newlineAndIndent",
+        "key": "enter",
+        "when": "editorTextFocus && resourceLangId == lispython && !suggestWidgetVisible && !renameInputVisible && !inSnippetMode && !quickFixWidgetVisible"
+      },
+      {
+        "command": "lispython.reindentLines",
+        "key": "tab",
+        "when": "editorTextFocus && resourceLangId == lispython && !suggestWidgetVisible && !inSnippetMode"
+      },
+      {
+        "command": "lispython.loadFileToRepl",
+        "key": "ctrl+shift+l",
+        "when": "editorTextFocus && resourceLangId == lispython"
+      },
+      {
+        "command": "lispython.macroexpand",
+        "key": "ctrl+shift+m",
+        "when": "editorTextFocus && resourceLangId == lispython"
       }
     ],
     "languages": [
@@ -131,6 +163,11 @@
         "path": "./syntaxes/lispython.tmLanguage.json"
       }
     ],
+    "configurationDefaults": {
+      "[lispython]": {
+        "editor.autoIndent": "none"
+      }
+    },
     "configuration": {
       "title": "LisPython",
       "properties": {
