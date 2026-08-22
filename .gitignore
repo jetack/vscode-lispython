@@ -1,3 +1,6 @@
 node_modules/
 out/
 *.vsix
+
+# Linked worktrees live here (git.md worktree workflow).
+.worktrees/
