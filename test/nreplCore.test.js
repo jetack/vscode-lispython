@@ -472,11 +472,15 @@ test('NreplServerSupervisor: a start that times out kills its server', async () 
     const fake = fakeServer(false);
     const sup = new core.NreplServerSupervisor();
     try {
-        await assert.rejects(sup.start(startOpts(fake.bin, { startTimeoutMs: 300 })), /did not start in time/);
-        assert.strictEqual(fake.pids().length, 1, 'the fake server must have been launched');
+        const started = sup.start(startOpts(fake.bin, { startTimeoutMs: 1000 }));
+        await new Promise((r) => setImmediate(r));
+        // From the supervisor, not the fake's pid file, which the shell may not have written yet.
+        const pid = sup.process?.pid;
+        assert.ok(pid, 'the server must have been spawned');
+        await assert.rejects(started, /did not start in time/);
         assert.strictEqual(sup.process, undefined);
         assert.strictEqual(sup.starting, false);
-        assert.ok(!alive(fake.pids()[0]), 'the timed-out server must be dead');
+        assert.ok(!alive(pid), 'the timed-out server must be dead');
     } finally {
         await sup.stop();
         fake.cleanup();
@@ -493,6 +497,41 @@ test('NreplServerSupervisor: a start whose connect fails kills its server', asyn
         assert.strictEqual(fake.pids().length, 1, 'the fake server must have been launched');
         assert.strictEqual(sup.process, undefined);
         assert.ok(!alive(fake.pids()[0]), 'the server whose connect failed must be dead');
+    } finally {
+        await sup.stop();
+        fake.cleanup();
+    }
+});
+
+test('NreplServerSupervisor: a superseded connect keeps the server', async () => {
+    const fake = fakeServer(true);
+    const sup = new core.NreplServerSupervisor();
+    try {
+        const opts = startOpts(fake.bin, { connect: async () => { throw new core.NreplConnectCancelled(); } });
+        await assert.rejects(sup.start(opts), core.NreplConnectCancelled);
+        assert.strictEqual(fake.pids().length, 1);
+        assert.strictEqual(sup.process?.pid, fake.pids()[0], 'the server must stay tracked');
+        assert.ok(alive(fake.pids()[0]), 'a superseded connect must not kill the server');
+        await sup.stop();
+        assert.ok(!alive(fake.pids()[0]), 'stop must still kill it');
+    } finally {
+        await sup.stop();
+        fake.cleanup();
+    }
+});
+
+test('NreplServerSupervisor: stop while a restart awaits the old server cancels the spawn', async () => {
+    const fake = fakeServer(true);
+    const sup = new core.NreplServerSupervisor();
+    try {
+        await sup.start(startOpts(fake.bin));
+        const restart = sup.start(startOpts(fake.bin));
+        const stopped = sup.stop();
+        await assert.rejects(restart, core.NreplConnectCancelled);
+        await stopped;
+        assert.strictEqual(sup.process, undefined);
+        assert.strictEqual(fake.pids().length, 1, 'the cancelled restart must not spawn');
+        for (const pid of fake.pids()) assert.ok(!alive(pid), `server ${pid} must be dead`);
     } finally {
         await sup.stop();
         fake.cleanup();

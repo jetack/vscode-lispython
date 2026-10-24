@@ -426,10 +426,14 @@ export interface NreplStartOptions extends NreplServerHandlers {
  * another is in flight shares its promise instead of spawning, since the second spawn
  * would replace the first process unkilled. A start whose port or connect step fails
  * kills its server, which would otherwise outlive the failure with nothing to stop it.
+ * A stop() while a start is still stopping the previous server cancels that start, so
+ * a Disconnect or deactivate never leaves a freshly spawned server behind.
  */
 export class NreplServerSupervisor {
     private proc: ChildProcess | undefined;
     private inFlight: Promise<void> | undefined;
+    /** Bumped by every stop(); a start that sees it move before spawning gives up. */
+    private stops = 0;
 
     get process(): ChildProcess | undefined {
         return this.proc;
@@ -450,8 +454,12 @@ export class NreplServerSupervisor {
     }
 
     private async run(opts: NreplStartOptions): Promise<void> {
-        await this.stop();
+        const stopped = this.stop();
+        const gen = this.stops;
+        await stopped;
+        if (gen !== this.stops) throw new NreplConnectCancelled();
         opts.beforeSpawn?.();
+        if (gen !== this.stops) throw new NreplConnectCancelled();
         const { proc, port } = startNreplServer(opts.lpy, opts.cwd, opts, opts.startTimeoutMs);
         this.proc = proc;
         // A failed spawn never emits 'exit'; drop the dead process here.
@@ -466,14 +474,17 @@ export class NreplServerSupervisor {
         try {
             await opts.connect(await port);
         } catch (err) {
-            // Only if still current: a stop() or newer start already owns what follows.
-            if (this.proc === proc) await this.stop();
+            // A superseding connect (e.g. to the .nrepl-port this server wrote) is not a
+            // failure of the server, so it stays. Otherwise kill it, only if still current:
+            // a stop() or newer start already owns what follows.
+            if (!(err instanceof NreplConnectCancelled) && this.proc === proc) await this.stop();
             throw err;
         }
     }
 
     /** SIGTERM the server, SIGKILL after 2 s; resolves on exit. No-op without a live server. */
     stop(): Promise<void> {
+        this.stops++;
         const proc = this.proc;
         this.proc = undefined;
         if (!proc || proc.exitCode !== null || proc.signalCode !== null) {

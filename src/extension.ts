@@ -685,12 +685,15 @@ async function startNrepl(): Promise<void> {
     const joined = nreplServer.starting;
     const out = getNreplOutputChannel();
     const lpy = getLpyCommand();
+    // Disconnect up front so commands see "not connected" during a restart and join this
+    // start instead of sending to the dying server. A joining caller must not: that would
+    // cancel the connect the first caller is making.
+    if (!joined) nreplConn.disconnect();
     try {
         await nreplServer.start({
             lpy,
             cwd: nreplHome().folder ?? process.cwd(),
             beforeSpawn: () => {
-                nreplConn.disconnect();
                 if (nreplPanel) {
                     nreplPanel.webview.postMessage({ type: 'clear' });
                 }
