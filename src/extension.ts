@@ -10,7 +10,7 @@ import {
     LanguageClientOptions,
     ServerOptions,
 } from 'vscode-languageclient/node';
-import { completionKindName, escapeHtml, findNreplPort, linkifyErrors, NREPL_PORT_FILE } from './nreplCore';
+import { completionKindName, findNreplPort, getReplHtml, makeNonce, NREPL_PORT_FILE, openFileWarning } from './nreplCore';
 
 let client: LanguageClient | undefined;
 let statusBarItem: vscode.StatusBarItem;
@@ -602,19 +602,19 @@ function getOrCreateReplPanel(): vscode.WebviewPanel {
         { viewColumn: vscode.ViewColumn.Two, preserveFocus: true },
         { enableScripts: true, retainContextWhenHidden: true },
     );
-    nreplPanel.webview.html = getReplHtml();
+    nreplPanel.webview.html = getReplHtml(makeNonce(), nreplPanel.webview.cspSource);
     nreplPanel.webview.onDidReceiveMessage(async (msg) => {
-        if (msg.type === 'openFile' && msg.file && msg.line) {
+        if (msg?.type === 'openFile' && typeof msg.file === 'string' && msg.file.length > 0 && Number.isInteger(msg.line) && msg.line > 0) {
             try {
                 const uri = vscode.Uri.file(msg.file);
-                const line = Math.max(0, msg.line - 1);
+                const line = msg.line - 1;
                 const doc = await vscode.workspace.openTextDocument(uri);
                 const editor = await vscode.window.showTextDocument(doc, vscode.ViewColumn.One);
                 const pos = new vscode.Position(line, 0);
                 editor.selection = new vscode.Selection(pos, pos);
                 editor.revealRange(new vscode.Range(pos, pos), vscode.TextEditorRevealType.InCenter);
             } catch {
-                vscode.window.showWarningMessage(`Could not open file: ${msg.file}`);
+                vscode.window.showWarningMessage(openFileWarning(msg.file));
             }
         }
     });
@@ -625,72 +625,6 @@ function getOrCreateReplPanel(): vscode.WebviewPanel {
 function appendToReplPanel(code: string, result: { value?: string | null; stdout?: string; error?: string | null }): void {
     const panel = getOrCreateReplPanel();
     panel.webview.postMessage({ type: 'eval', code, result });
-}
-
-function getReplHtml(): string {
-    return `<!DOCTYPE html>
-<html>
-<head>
-<style>
-  body {
-    font-family: var(--vscode-editor-font-family, monospace);
-    font-size: var(--vscode-editor-font-size, 13px);
-    padding: 8px;
-    color: var(--vscode-editor-foreground);
-    background: var(--vscode-editor-background);
-  }
-  .entry { margin-bottom: 12px; border-bottom: 1px solid var(--vscode-editorGroup-border); padding-bottom: 8px; }
-  .code { color: var(--vscode-textPreformat-foreground); white-space: pre-wrap; }
-  .prompt { color: var(--vscode-descriptionForeground); }
-  .value { color: var(--vscode-debugTokenExpression-number); white-space: pre-wrap; }
-  .stdout { color: var(--vscode-terminal-ansiGreen); white-space: pre-wrap; }
-  .error { color: var(--vscode-errorForeground); white-space: pre-wrap; }
-  .file-link { color: var(--vscode-textLink-foreground); cursor: pointer; text-decoration: underline; }
-  .file-link:hover { color: var(--vscode-textLink-activeForeground); }
-  #entries { overflow-y: auto; }
-</style>
-</head>
-<body>
-<div id="entries"></div>
-<script>
-  const entries = document.getElementById('entries');
-  const vscode = acquireVsCodeApi();
-  window.addEventListener('message', (e) => {
-    const { type, code, result } = e.data;
-    if (type === 'clear') { entries.innerHTML = ''; return; }
-    if (type !== 'eval') return;
-    const div = document.createElement('div');
-    div.className = 'entry';
-
-    let html = '<span class="prompt">repl&gt; </span><span class="code">' + escapeHtml(code) + '</span>';
-
-    if (result.stdout) {
-      html += '<br><span class="stdout">' + escapeHtml(result.stdout.replace(/\\n$/, '')) + '</span>';
-    }
-    if (result.error) {
-      html += '<br><span class="error">' + linkifyErrors(result.error) + '</span>';
-    } else if (result.value && result.value !== 'None') {
-      html += '<br><span class="value">' + escapeHtml(result.value) + '</span>';
-    }
-
-    div.innerHTML = html;
-    entries.appendChild(div);
-    div.scrollIntoView({ behavior: 'smooth' });
-  });
-
-  ${escapeHtml.toString()}
-
-  ${linkifyErrors.toString()}
-
-  document.addEventListener('click', (e) => {
-    const link = e.target.closest('.file-link');
-    if (link) {
-      vscode.postMessage({ type: 'openFile', file: link.dataset.file, line: parseInt(link.dataset.line, 10) });
-    }
-  });
-</script>
-</body>
-</html>`;
 }
 
 function updateNreplStatus(connected: boolean): void {
