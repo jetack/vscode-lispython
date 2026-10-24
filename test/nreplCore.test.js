@@ -72,3 +72,54 @@ test('webview-injected sources are self-contained', () => {
     assert.strictEqual(linkify(err), core.linkifyErrors(err));
     assert.match(linkify(err), /data-file="\/x\/y\.py" data-line="3"/);
 });
+
+// Copied from vs/base/common/linkedText.ts (VS Code), the parser behind notification links.
+const LINK_RE = /\[([^\]]+)\]\(((?:https?:\/\/|command:|file:)[^\)\s]+)(?: (["'])(.+?)(\3))?\)/i;
+
+test('openFileWarning defuses notification command links', () => {
+    const evil = '[x](command:workbench.action.terminal.sendSequence)';
+    assert.ok(LINK_RE.test(evil));
+    const warning = core.openFileWarning(evil);
+    assert.ok(!LINK_RE.test(warning));
+    assert.ok(warning.startsWith('Could not open file: "') && warning.endsWith('"'));
+    assert.strictEqual(core.openFileWarning('/home/a b/x.py'), 'Could not open file: "/home/a b/x.py"');
+    assert.strictEqual(core.openFileWarning(42), 'Could not open file: "42"');
+});
+
+test('getReplHtml carries a nonce-based CSP on every script and style tag', () => {
+    const html = core.getReplHtml('N0nce+/=', 'vscode-webview:');
+    assert.ok(html.includes(`<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src vscode-webview: 'nonce-N0nce+/='; script-src 'nonce-N0nce+/=';">`));
+    const tags = html.match(/<(script|style)\b[^>]*>/g);
+    assert.strictEqual(tags.length, 2);
+    for (const tag of tags) assert.ok(tag.includes('nonce="N0nce+/="'), tag);
+    assert.ok(!/<script(?![^>]*nonce=)/.test(html));
+    assert.notStrictEqual(core.makeNonce(), core.makeNonce());
+});
+
+test('injected escapeHtml/linkifyErrors work inside the webview script', () => {
+    const vm = require('node:vm');
+    const html = core.getReplHtml('n', 'c');
+    const script = /<script nonce="n">([\s\S]*?)<\/script>/.exec(html)[1];
+    let listener;
+    const entries = { innerHTML: '', appendChild() {} };
+    const ctx = {
+        document: {
+            getElementById: () => entries,
+            addEventListener() {},
+            createElement: () => ({ scrollIntoView() {} }),
+        },
+        window: { addEventListener: (type, fn) => { if (type === 'message') listener = fn; } },
+        acquireVsCodeApi: () => ({ postMessage() {} }),
+    };
+    vm.createContext(ctx);
+    vm.runInContext(script, ctx);
+    const src = 'File "/a.py", line 3';
+    assert.strictEqual(vm.runInContext(`linkifyErrors(${JSON.stringify(src)})`, ctx), core.linkifyErrors(src));
+    assert.strictEqual(vm.runInContext(`escapeHtml('<b>')`, ctx), '&lt;b&gt;');
+
+    let div;
+    ctx.document.createElement = () => (div = { scrollIntoView() {} });
+    listener({ data: { type: 'eval', code: '<b>', result: { error: src } } });
+    assert.ok(div.innerHTML.includes('&lt;b&gt;'));
+    assert.ok(div.innerHTML.includes('<span class="file-link" data-file="/a.py" data-line="3">'));
+});

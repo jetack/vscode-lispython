@@ -3,6 +3,7 @@
 import type { CompletionItemKind } from 'vscode';
 import * as fs from 'fs';
 import * as path from 'path';
+import * as crypto from 'crypto';
 
 // Mirrors lpy-mode's kind table; vscode has no macro kind, so macros read as functions.
 export const COMPLETION_KINDS: Record<string, keyof typeof CompletionItemKind> = {
@@ -56,8 +57,10 @@ export function findNreplPort(startDir: string): number | undefined {
 }
 
 // escapeHtml and linkifyErrors are injected into the REPL webview script via
-// Function.prototype.toString (see getReplHtml in extension.ts), so they must stay
-// self-contained: linkifyErrors may reference only escapeHtml, by name.
+// Function.prototype.toString (see getReplHtml below), so they must stay
+// self-contained: linkifyErrors may reference only escapeHtml, by name. A bundler or
+// minifier (esbuild/webpack/terser) would rename or inline them and break the
+// injection; the getReplHtml script test in test/ pins this.
 
 /** Escapes text for both element content and double/single-quoted attribute values. */
 export function escapeHtml(s: string): string {
@@ -86,4 +89,90 @@ export function linkifyErrors(text: string): string {
         last = m.index + m[0].length;
     }
     return out + escapeHtml(text.slice(last));
+}
+
+/**
+ * VS Code notifications render `[label](command:...)` as clickable links, and its
+ * linkedText parser has no escape syntax, so adjacency is broken instead: a
+ * zero-width space between `]` and `(` keeps the link regex from matching.
+ */
+export function neutralizeNotificationLinks(text: string): string {
+    return text.replace(/\]\(/g, ']\u200B(');
+}
+
+/** Warning text for a file that could not be opened; the path is untrusted REPL output. */
+export function openFileWarning(file: unknown): string {
+    return `Could not open file: "${neutralizeNotificationLinks(String(file))}"`;
+}
+
+/** Fresh per-render CSP nonce. */
+export function makeNonce(): string {
+    return crypto.randomBytes(16).toString('base64');
+}
+
+export function getReplHtml(nonce: string, cspSource: string): string {
+    return `<!DOCTYPE html>
+<html>
+<head>
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${cspSource} 'nonce-${nonce}'; script-src 'nonce-${nonce}';">
+<style nonce="${nonce}">
+  body {
+    font-family: var(--vscode-editor-font-family, monospace);
+    font-size: var(--vscode-editor-font-size, 13px);
+    padding: 8px;
+    color: var(--vscode-editor-foreground);
+    background: var(--vscode-editor-background);
+  }
+  .entry { margin-bottom: 12px; border-bottom: 1px solid var(--vscode-editorGroup-border); padding-bottom: 8px; }
+  .code { color: var(--vscode-textPreformat-foreground); white-space: pre-wrap; }
+  .prompt { color: var(--vscode-descriptionForeground); }
+  .value { color: var(--vscode-debugTokenExpression-number); white-space: pre-wrap; }
+  .stdout { color: var(--vscode-terminal-ansiGreen); white-space: pre-wrap; }
+  .error { color: var(--vscode-errorForeground); white-space: pre-wrap; }
+  .file-link { color: var(--vscode-textLink-foreground); cursor: pointer; text-decoration: underline; }
+  .file-link:hover { color: var(--vscode-textLink-activeForeground); }
+  #entries { overflow-y: auto; }
+</style>
+</head>
+<body>
+<div id="entries"></div>
+<script nonce="${nonce}">
+  const entries = document.getElementById('entries');
+  const vscode = acquireVsCodeApi();
+  window.addEventListener('message', (e) => {
+    const { type, code, result } = e.data;
+    if (type === 'clear') { entries.innerHTML = ''; return; }
+    if (type !== 'eval') return;
+    const div = document.createElement('div');
+    div.className = 'entry';
+
+    let html = '<span class="prompt">repl&gt; </span><span class="code">' + escapeHtml(code) + '</span>';
+
+    if (result.stdout) {
+      html += '<br><span class="stdout">' + escapeHtml(result.stdout.replace(/\\n$/, '')) + '</span>';
+    }
+    if (result.error) {
+      html += '<br><span class="error">' + linkifyErrors(result.error) + '</span>';
+    } else if (result.value && result.value !== 'None') {
+      html += '<br><span class="value">' + escapeHtml(result.value) + '</span>';
+    }
+
+    div.innerHTML = html;
+    entries.appendChild(div);
+    div.scrollIntoView({ behavior: 'smooth' });
+  });
+
+  ${escapeHtml.toString()}
+
+  ${linkifyErrors.toString()}
+
+  document.addEventListener('click', (e) => {
+    const link = e.target.closest('.file-link');
+    if (link) {
+      vscode.postMessage({ type: 'openFile', file: link.dataset.file, line: parseInt(link.dataset.line, 10) });
+    }
+  });
+</script>
+</body>
+</html>`;
 }
