@@ -1,7 +1,7 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
 import * as fs from 'fs';
-import { execFile, ChildProcess } from 'child_process';
+import { execFile } from 'child_process';
 import {
     CloseAction,
     ErrorAction,
@@ -12,7 +12,7 @@ import {
 import {
     chooseNreplHome, completionKindName, findNreplPortFor, getReplHtml, makeNonce, NREPL_PORT_FILE,
     NreplConnectCancelled, NreplConnection, nreplRequestOn, openFileWarning, resolveActiveFile,
-    startNreplServer,
+    NreplServerSupervisor,
 } from './nreplCore';
 
 let client: LanguageClient | undefined;
@@ -574,7 +574,7 @@ function flashRange(editor: vscode.TextEditor, range: [number, number]): void {
 // ---------------------------------------------------------------------------
 
 const nreplConn = new NreplConnection((connected) => updateNreplStatus(connected));
-let nreplProcess: ChildProcess | undefined;
+const nreplServer = new NreplServerSupervisor();
 let nreplOutputChannel: vscode.OutputChannel | undefined;
 let nreplStatusItem: vscode.StatusBarItem | undefined;
 
@@ -677,57 +677,37 @@ function nreplHome(): { activeFile: string | undefined; folder: string | undefin
 
 function disconnectNrepl(): Promise<void> {
     nreplConn.disconnect();
-    const proc = nreplProcess;
-    nreplProcess = undefined;
-    if (!proc || proc.exitCode !== null) {
-        return Promise.resolve();
-    }
-    return new Promise((resolve) => {
-        proc.on('exit', () => resolve());
-        proc.kill('SIGTERM');
-        // Force kill after 2 seconds if still alive
-        setTimeout(() => {
-            try { proc.kill('SIGKILL'); } catch {}
-            resolve();
-        }, 2000);
-    });
+    return nreplServer.stop();
 }
 
 async function startNrepl(): Promise<void> {
-    await disconnectNrepl();
-    if (nreplPanel) {
-        nreplPanel.webview.postMessage({ type: 'clear' });
-    }
-
-    const lpy = getLpyCommand();
-    const cwd = nreplHome().folder ?? process.cwd();
-
+    // A caller joining an in-flight start shares its outcome; the first caller reports it.
+    const joined = nreplServer.starting;
     const out = getNreplOutputChannel();
-    out.show(true);
-    out.appendLine(`Starting nREPL server: ${lpy} --nrepl`);
-
-    const { proc, port: portPromise } = startNreplServer(lpy, cwd, {
-        onStdout: (text) => out.append(text),
-        onStderr: (text) => out.append(text),
-    });
-    nreplProcess = proc;
-    // A failed spawn never emits 'exit'; drop the dead process here.
-    proc.on('error', () => {
-        if (nreplProcess === proc) nreplProcess = undefined;
-    });
-    // Status is nreplConn's alone: the server dying closes its socket, which reports it.
-    proc.on('exit', (code) => {
-        out.appendLine(`nREPL server exited (code ${code})`);
-        // A late exit of a replaced server must not forget its successor.
-        if (nreplProcess === proc) nreplProcess = undefined;
-    });
-
+    const lpy = getLpyCommand();
     try {
-        const port = await portPromise;
-        await nreplConn.connect(port);
-        out.appendLine(`Connected to nREPL on port ${port}`);
+        await nreplServer.start({
+            lpy,
+            cwd: nreplHome().folder ?? process.cwd(),
+            beforeSpawn: () => {
+                nreplConn.disconnect();
+                if (nreplPanel) {
+                    nreplPanel.webview.postMessage({ type: 'clear' });
+                }
+                out.show(true);
+                out.appendLine(`Starting nREPL server: ${lpy} --nrepl`);
+            },
+            onStdout: (text) => out.append(text),
+            onStderr: (text) => out.append(text),
+            // Status is nreplConn's alone: the server dying closes its socket, which reports it.
+            onExit: (code) => out.appendLine(`nREPL server exited (code ${code})`),
+            connect: async (port) => {
+                await nreplConn.connect(port);
+                out.appendLine(`Connected to nREPL on port ${port}`);
+            },
+        });
     } catch (err) {
-        if (err instanceof NreplConnectCancelled) return;
+        if (joined || err instanceof NreplConnectCancelled) return;
         const msg = err instanceof Error ? err.message : String(err);
         out.appendLine(msg);
         vscode.window.showErrorMessage(msg);

@@ -380,6 +380,7 @@ export function startNreplServer(
     lpy: string,
     cwd: string,
     handlers: NreplServerHandlers,
+    startTimeoutMs = NREPL_START_TIMEOUT_MS,
 ): { proc: ChildProcess; port: Promise<number> } {
     const proc = spawn(lpy, ['--nrepl'], { cwd });
     // Decoder per stream, not per chunk, so a character split across reads survives.
@@ -387,7 +388,7 @@ export function startNreplServer(
     proc.stderr?.setEncoding('utf8');
     const port = new Promise<number>((resolve, reject) => {
         const timeout = setTimeout(
-            () => reject(new Error('nREPL server did not start in time')), NREPL_START_TIMEOUT_MS);
+            () => reject(new Error('nREPL server did not start in time')), startTimeoutMs);
         proc.stdout?.on('data', (text: string) => {
             handlers.onStdout(text);
             const match = text.match(/started on .+:(\d+)/);
@@ -407,4 +408,87 @@ export function startNreplServer(
         });
     });
     return { proc, port };
+}
+
+
+export interface NreplStartOptions extends NreplServerHandlers {
+    lpy: string;
+    cwd: string;
+    /** Runs inside the serialized section, after the previous server is stopped. */
+    beforeSpawn?(): void;
+    onExit?(code: number | null): void;
+    connect(port: number): Promise<void>;
+    startTimeoutMs?: number;
+}
+
+/**
+ * Owns the one nREPL server this extension spawned. Starts are serialized: a start while
+ * another is in flight shares its promise instead of spawning, since the second spawn
+ * would replace the first process unkilled. A start whose port or connect step fails
+ * kills its server, which would otherwise outlive the failure with nothing to stop it.
+ */
+export class NreplServerSupervisor {
+    private proc: ChildProcess | undefined;
+    private inFlight: Promise<void> | undefined;
+
+    get process(): ChildProcess | undefined {
+        return this.proc;
+    }
+
+    /** True while a start is in flight; a start() now joins it and ignores its options. */
+    get starting(): boolean {
+        return this.inFlight !== undefined;
+    }
+
+    start(opts: NreplStartOptions): Promise<void> {
+        if (this.inFlight) return this.inFlight;
+        const run = this.run(opts).finally(() => {
+            if (this.inFlight === run) this.inFlight = undefined;
+        });
+        this.inFlight = run;
+        return run;
+    }
+
+    private async run(opts: NreplStartOptions): Promise<void> {
+        await this.stop();
+        opts.beforeSpawn?.();
+        const { proc, port } = startNreplServer(opts.lpy, opts.cwd, opts, opts.startTimeoutMs);
+        this.proc = proc;
+        // A failed spawn never emits 'exit'; drop the dead process here.
+        proc.on('error', () => {
+            if (this.proc === proc) this.proc = undefined;
+        });
+        proc.on('exit', (code) => {
+            opts.onExit?.(code);
+            // A late exit of a replaced server must not forget its successor.
+            if (this.proc === proc) this.proc = undefined;
+        });
+        try {
+            await opts.connect(await port);
+        } catch (err) {
+            // Only if still current: a stop() or newer start already owns what follows.
+            if (this.proc === proc) await this.stop();
+            throw err;
+        }
+    }
+
+    /** SIGTERM the server, SIGKILL after 2 s; resolves on exit. No-op without a live server. */
+    stop(): Promise<void> {
+        const proc = this.proc;
+        this.proc = undefined;
+        if (!proc || proc.exitCode !== null || proc.signalCode !== null) {
+            return Promise.resolve();
+        }
+        return new Promise((resolve) => {
+            const force = setTimeout(() => {
+                try { proc.kill('SIGKILL'); } catch {}
+                resolve();
+            }, 2000);
+            proc.once('exit', () => {
+                clearTimeout(force);
+                resolve();
+            });
+            proc.kill('SIGTERM');
+        });
+    }
 }

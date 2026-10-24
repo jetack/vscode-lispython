@@ -414,3 +414,87 @@ test('startNreplServer resolves the port from the server banner', async () => {
         fs.rmSync(dir, { recursive: true });
     }
 });
+
+// A fake `lpy` that appends its pid to `spawns` on every launch, then optionally prints
+// the banner, then keeps running like a real server.
+function fakeServer(banner) {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'fakelpy-'));
+    const bin = path.join(dir, 'lpy');
+    const spawns = path.join(dir, 'spawns');
+    const announce = banner ? 'sleep 0.2\necho "nREPL server started on 127.0.0.1:1234"\n' : '';
+    fs.writeFileSync(bin, `#!/bin/sh\necho $$ >> "${spawns}"\n${announce}exec sleep 30\n`, { mode: 0o755 });
+    const pids = () => (fs.existsSync(spawns)
+        ? fs.readFileSync(spawns, 'utf8').split('\n').filter(Boolean).map(Number)
+        : []);
+    const cleanup = () => {
+        for (const pid of pids()) { try { process.kill(pid, 'SIGKILL'); } catch {} }
+        fs.rmSync(dir, { recursive: true });
+    };
+    return { bin, pids, cleanup };
+}
+
+function alive(pid) {
+    try {
+        process.kill(pid, 0);
+        return true;
+    } catch (err) {
+        if (err.code === 'ESRCH') return false;
+        throw err;
+    }
+}
+
+function startOpts(bin, extra) {
+    return { lpy: bin, cwd: process.cwd(), onStdout() {}, onStderr() {}, connect: async () => {}, ...extra };
+}
+
+test('NreplServerSupervisor: overlapping starts share one spawn, and stop kills it', async () => {
+    const fake = fakeServer(true);
+    const sup = new core.NreplServerSupervisor();
+    try {
+        const ports = [];
+        const opts = startOpts(fake.bin, { connect: async (port) => { ports.push(port); } });
+        const a = sup.start(opts);
+        const b = sup.start(opts);
+        await Promise.all([a, b]);
+        assert.strictEqual(fake.pids().length, 1, 'a second start while one is in flight must not spawn');
+        assert.deepStrictEqual(ports, [1234]);
+        assert.strictEqual(sup.process.pid, fake.pids()[0]);
+        await sup.stop();
+        assert.strictEqual(sup.process, undefined);
+        for (const pid of fake.pids()) assert.ok(!alive(pid), `server ${pid} must be dead after stop`);
+    } finally {
+        await sup.stop();
+        fake.cleanup();
+    }
+});
+
+test('NreplServerSupervisor: a start that times out kills its server', async () => {
+    const fake = fakeServer(false);
+    const sup = new core.NreplServerSupervisor();
+    try {
+        await assert.rejects(sup.start(startOpts(fake.bin, { startTimeoutMs: 300 })), /did not start in time/);
+        assert.strictEqual(fake.pids().length, 1, 'the fake server must have been launched');
+        assert.strictEqual(sup.process, undefined);
+        assert.strictEqual(sup.starting, false);
+        assert.ok(!alive(fake.pids()[0]), 'the timed-out server must be dead');
+    } finally {
+        await sup.stop();
+        fake.cleanup();
+    }
+});
+
+test('NreplServerSupervisor: a start whose connect fails kills its server', async () => {
+    const fake = fakeServer(true);
+    const sup = new core.NreplServerSupervisor();
+    try {
+        const refused = new Error('connect refused');
+        const opts = startOpts(fake.bin, { connect: async () => { throw refused; } });
+        await assert.rejects(sup.start(opts), (err) => err === refused);
+        assert.strictEqual(fake.pids().length, 1, 'the fake server must have been launched');
+        assert.strictEqual(sup.process, undefined);
+        assert.ok(!alive(fake.pids()[0]), 'the server whose connect failed must be dead');
+    } finally {
+        await sup.stop();
+        fake.cleanup();
+    }
+});
