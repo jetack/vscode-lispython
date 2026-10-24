@@ -705,6 +705,8 @@ function connectNrepl(port: number): Promise<void> {
             reject(err);
         });
         sock.on('close', () => {
+            // A replaced socket's late close must not clear its successor.
+            if (nreplSocket !== sock) return;
             nreplSocket = undefined;
             updateNreplStatus(false);
         });
