@@ -604,10 +604,10 @@ function getOrCreateReplPanel(): vscode.WebviewPanel {
     );
     nreplPanel.webview.html = getReplHtml(makeNonce(), nreplPanel.webview.cspSource);
     nreplPanel.webview.onDidReceiveMessage(async (msg) => {
-        if (msg?.type === 'openFile' && typeof msg.file === 'string' && Number.isInteger(msg.line) && msg.line > 0) {
+        if (msg?.type === 'openFile' && typeof msg.file === 'string' && msg.file.length > 0 && Number.isInteger(msg.line) && msg.line > 0) {
             try {
                 const uri = vscode.Uri.file(msg.file);
-                const line = Math.max(0, msg.line - 1);
+                const line = msg.line - 1;
                 const doc = await vscode.workspace.openTextDocument(uri);
                 const editor = await vscode.window.showTextDocument(doc, vscode.ViewColumn.One);
                 const pos = new vscode.Position(line, 0);

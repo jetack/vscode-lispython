@@ -60,7 +60,8 @@ export function findNreplPort(startDir: string): number | undefined {
 // Function.prototype.toString (see getReplHtml below), so they must stay
 // self-contained: linkifyErrors may reference only escapeHtml, by name. A bundler or
 // minifier (esbuild/webpack/terser) would rename or inline them and break the
-// injection; the getReplHtml script test in test/ pins this.
+// injection; the getReplHtml script test in test/ pins this only for the tsc output
+// in out/. If a bundle ever becomes `main`, the test must run against the bundle.
 
 /** Escapes text for both element content and double/single-quoted attribute values. */
 export function escapeHtml(s: string): string {
