@@ -472,8 +472,14 @@ export class NreplServerSupervisor {
             if (this.proc === proc) this.proc = undefined;
         });
         try {
-            await opts.connect(await port);
+            const p = await port;
+            // Don't connect to a server a stop() is already killing.
+            if (gen !== this.stops) throw new NreplConnectCancelled();
+            await opts.connect(p);
         } catch (err) {
+            // A stop() since the spawn is a cancel, not a failure: whatever it broke (e.g. the
+            // server "exited before starting") must not surface. stop() already killed it.
+            if (gen !== this.stops) throw err instanceof NreplConnectCancelled ? err : new NreplConnectCancelled();
             // A superseding connect (e.g. to the .nrepl-port this server wrote) is not a
             // failure of the server, so it stays. Otherwise kill it, only if still current:
             // a stop() or newer start already owns what follows.

@@ -520,6 +520,47 @@ test('NreplServerSupervisor: a superseded connect keeps the server', async () =>
     }
 });
 
+test('NreplServerSupervisor: stop after the spawn cancels the start without connecting', async () => {
+    const fake = fakeServer(true);
+    const sup = new core.NreplServerSupervisor();
+    try {
+        let connects = 0;
+        const started = sup.start(startOpts(fake.bin, { connect: async () => { connects++; } }));
+        await new Promise((r) => setImmediate(r));
+        const pid = sup.process?.pid;
+        assert.ok(pid, 'the server must have been spawned');
+        await sup.stop();
+        await assert.rejects(started, core.NreplConnectCancelled);
+        assert.strictEqual(connects, 0, 'a stopped server must not be connected to');
+        assert.strictEqual(sup.process, undefined);
+        assert.ok(!alive(pid), 'the stopped server must be dead');
+    } finally {
+        await sup.stop();
+        fake.cleanup();
+    }
+});
+
+test('NreplServerSupervisor: stop as the banner arrives skips the connect', async () => {
+    const fake = fakeServer(true);
+    const sup = new core.NreplServerSupervisor();
+    try {
+        let connects = 0;
+        let pid;
+        let stopping;
+        // onStdout runs before the port resolves, so this stop lands between banner and connect.
+        const onStdout = () => { pid = sup.process?.pid; stopping = sup.stop(); };
+        const started = sup.start(startOpts(fake.bin, { onStdout, connect: async () => { connects++; } }));
+        await assert.rejects(started, core.NreplConnectCancelled);
+        assert.ok(pid, 'the banner must have been seen');
+        assert.strictEqual(connects, 0, 'a stopped server must not be connected to');
+        await stopping;
+        assert.ok(!alive(pid), 'the stopped server must be dead');
+    } finally {
+        await sup.stop();
+        fake.cleanup();
+    }
+});
+
 test('NreplServerSupervisor: stop while a restart awaits the old server cancels the spawn', async () => {
     const fake = fakeServer(true);
     const sup = new core.NreplServerSupervisor();
