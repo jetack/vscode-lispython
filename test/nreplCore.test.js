@@ -29,7 +29,7 @@ test('findNreplPort walks upward', () => {
     fs.writeFileSync(path.join(root, '.nrepl-port'), '4321');
     assert.strictEqual(core.findNreplPort(sub), 4321);
     fs.writeFileSync(path.join(root, 'a', '.nrepl-port'), 'junk');
-    assert.strictEqual(core.findNreplPort(sub), 4321);
+    assert.strictEqual(core.findNreplPort(sub), undefined);
     fs.writeFileSync(path.join(root, 'a', '.nrepl-port'), '99');
     assert.strictEqual(core.findNreplPort(sub), 99);
     fs.rmSync(root, { recursive: true });

@@ -43,10 +43,12 @@ export const NREPL_PORT_FILE = '.nrepl-port';
 export function findNreplPort(startDir: string): number | undefined {
     let dir = path.resolve(startDir);
     for (;;) {
+        let text: string | undefined;
         try {
-            const port = parsePortFile(fs.readFileSync(path.join(dir, NREPL_PORT_FILE), 'utf8'));
-            if (port !== undefined) return port;
+            text = fs.readFileSync(path.join(dir, NREPL_PORT_FILE), 'utf8');
         } catch { /* absent or unreadable: keep walking up */ }
+        // The nearest file wins; a malformed one must not fall through to an unrelated server above.
+        if (text !== undefined) return parsePortFile(text);
         const parent = path.dirname(dir);
         if (parent === dir) return undefined;
         dir = parent;

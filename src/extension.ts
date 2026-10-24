@@ -786,15 +786,20 @@ async function startNrepl(): Promise<void> {
 }
 
 async function connectNreplFromPortFile(): Promise<void> {
-    const cwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? process.cwd();
+    const cwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+    if (!cwd) {
+        vscode.window.showInformationMessage('Open a folder to look for .nrepl-port.');
+        return;
+    }
     const port = findNreplPort(cwd);
     if (port === undefined) {
         const pick = await vscode.window.showInformationMessage(
-            `No ${NREPL_PORT_FILE} found at or above ${cwd}.`, 'Start nREPL Server');
+            `No valid ${NREPL_PORT_FILE} found at or above ${cwd}.`, 'Start nREPL Server');
         if (pick) await startNrepl();
         return;
     }
-    await disconnectNrepl();
+    // Not disconnectNrepl(): that would kill a server this extension spawned, which wrote this very file.
+    // connectNrepl drops any existing socket itself.
     try {
         await connectNrepl(port);
     } catch (err) {
