@@ -125,8 +125,9 @@ test('injected escapeHtml/linkifyErrors work inside the webview script', () => {
     assert.ok(div.innerHTML.includes('<span class="file-link" data-file="/a.py" data-line="3">'));
 });
 
-test('findNreplPortFor: active file walks up its own root, else folders in order', () => {
+test('findNreplPortFor: active file walks up its own root, else folders in order', (t) => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'nrepl-roots-'));
+    t.after(() => fs.rmSync(root, { recursive: true }));
     const a = path.join(root, 'A');
     const b = path.join(root, 'B');
     fs.mkdirSync(path.join(a, 'src'), { recursive: true });
@@ -142,7 +143,28 @@ test('findNreplPortFor: active file walks up its own root, else folders in order
     // Nearest file wins, even when malformed.
     fs.writeFileSync(path.join(b, 'src', '.nrepl-port'), 'junk');
     assert.strictEqual(core.findNreplPortFor(path.join(b, 'src', 'x.lpy'), [a, b]), undefined);
-    fs.rmSync(root, { recursive: true });
+});
+
+test('chooseNreplHome: owning folder, else folder 0, else the loose file', () => {
+    const file = path.join('/w', 'B', 'src', 'x.lpy');
+    assert.deepStrictEqual(core.chooseNreplHome(file, '/w/B', ['/w/A', '/w/B']),
+        { activeFile: file, folder: '/w/B' });
+    // A file outside every folder defers to the folders, matching the connect search.
+    assert.deepStrictEqual(core.chooseNreplHome('/elsewhere/y.lpy', undefined, ['/w/A', '/w/B']),
+        { activeFile: undefined, folder: '/w/A' });
+    assert.deepStrictEqual(core.chooseNreplHome(undefined, undefined, ['/w/A', '/w/B']),
+        { activeFile: undefined, folder: '/w/A' });
+    assert.deepStrictEqual(core.chooseNreplHome('/loose/z.lpy', undefined, []),
+        { activeFile: '/loose/z.lpy', folder: '/loose' });
+    assert.deepStrictEqual(core.chooseNreplHome(undefined, undefined, []),
+        { activeFile: undefined, folder: undefined });
+});
+
+test('resolveActiveFile: falls back to the last LisPython file only when no editor has focus', () => {
+    assert.strictEqual(core.resolveActiveFile(undefined, '/w/B/x.lpy'), '/w/B/x.lpy');
+    assert.strictEqual(core.resolveActiveFile({ scheme: 'file', fsPath: '/w/A/y.py' }, '/w/B/x.lpy'), '/w/A/y.py');
+    assert.strictEqual(core.resolveActiveFile({ scheme: 'untitled', fsPath: 'Untitled-1' }, '/w/B/x.lpy'), undefined);
+    assert.strictEqual(core.resolveActiveFile(undefined, undefined), undefined);
 });
 
 test('.vscodeignore keeps tests out of the .vsix', () => {
@@ -274,5 +296,38 @@ test('NreplConnection: the server closing the current socket reports disconnecte
     await conn.connect(a.address().port);
     await waitFor(() => conn.socket === undefined, 'current socket to clear');
     assert.deepStrictEqual(statuses, [true, false]);
+});
+
+function clientTo(t, server) {
+    return new Promise((resolve) => {
+        const sock = net.connect(server.address().port, '127.0.0.1', () => resolve(sock));
+        sock.on('error', () => {});
+        t.after(() => sock.destroy());
+    });
+}
+
+const requestListeners = (sock) => ['data', 'close', 'error'].map((e) => sock.listenerCount(e));
+
+test('nreplRequestOn resolves with the first response line and removes its listeners', async (t) => {
+    const a = await listen(t);
+    a.on('connection', (s) => s.on('data', () => s.write('{"value": "3"}\n{"value": "ignored"}\n')));
+    const sock = await clientTo(t, a);
+    const before = requestListeners(sock);
+    assert.deepStrictEqual(await core.nreplRequestOn(sock, { op: 'eval', code: '(+ 1 2)' }), { value: '3' });
+    assert.deepStrictEqual(requestListeners(sock), before);
+});
+
+test('nreplRequestOn rejects when the server closes the socket mid-request', async (t) => {
+    const a = await listen(t);
+    a.on('connection', (s) => s.on('data', () => s.destroy()));
+    const sock = await clientTo(t, a);
+    const before = requestListeners(sock);
+    const pending = core.nreplRequestOn(sock, { op: 'eval', code: '(sleep 10)' });
+    const outcome = await Promise.race([
+        pending.then(() => 'resolved', (e) => e.message),
+        new Promise((r) => setTimeout(() => r('still pending'), 2000)),
+    ]);
+    assert.strictEqual(outcome, 'nREPL connection closed');
+    assert.deepStrictEqual(requestListeners(sock), before);
 });
 

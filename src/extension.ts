@@ -10,8 +10,8 @@ import {
     ServerOptions,
 } from 'vscode-languageclient/node';
 import {
-    completionKindName, findNreplPortFor, getReplHtml, makeNonce, NREPL_PORT_FILE,
-    NreplConnectCancelled, NreplConnection, openFileWarning,
+    chooseNreplHome, completionKindName, findNreplPortFor, getReplHtml, makeNonce, NREPL_PORT_FILE,
+    NreplConnectCancelled, NreplConnection, nreplRequestOn, openFileWarning, resolveActiveFile,
 } from './nreplCore';
 
 let client: LanguageClient | undefined;
@@ -653,22 +653,25 @@ function nreplConnected(): boolean {
     return sock !== undefined && !sock.destroyed;
 }
 
-/**
- * Where the nREPL lives for the active file: the active file's workspace folder, else
- * folder 0. A file outside every workspace folder counts only when no folder is open.
- * startNrepl spawns the server in `folder` (so it writes .nrepl-port there) and
- * connectNreplFromPortFile searches from `activeFile`, else across the folders, which
- * keeps the two sites agreeing on one location.
- */
+/** Last focused file-scheme LisPython document; see resolveActiveFile. */
+let lastLispyFile: string | undefined;
+
+function trackLispyEditor(editor: vscode.TextEditor | undefined): void {
+    const doc = editor?.document;
+    if (doc && doc.languageId === 'lispython' && doc.uri.scheme === 'file') {
+        lastLispyFile = doc.uri.fsPath;
+    }
+}
+
+/** Gathers the inputs for chooseNreplHome, which owns the decision. */
 function nreplHome(): { activeFile: string | undefined; folder: string | undefined } {
     const uri = vscode.window.activeTextEditor?.document.uri;
-    const file = uri?.scheme === 'file' ? uri : undefined;
-    const owner = file && vscode.workspace.getWorkspaceFolder(file);
-    if (file && owner) return { activeFile: file.fsPath, folder: owner.uri.fsPath };
-    const first = vscode.workspace.workspaceFolders?.[0];
-    if (first) return { activeFile: undefined, folder: first.uri.fsPath };
-    if (file) return { activeFile: file.fsPath, folder: path.dirname(file.fsPath) };
-    return { activeFile: undefined, folder: undefined };
+    const activeFile = resolveActiveFile(uri && { scheme: uri.scheme, fsPath: uri.fsPath }, lastLispyFile);
+    const owner = activeFile === undefined
+        ? undefined
+        : vscode.workspace.getWorkspaceFolder(vscode.Uri.file(activeFile))?.uri.fsPath;
+    const folders = (vscode.workspace.workspaceFolders ?? []).map((f) => f.uri.fsPath);
+    return chooseNreplHome(activeFile, owner, folders);
 }
 
 function disconnectNrepl(): Promise<void> {
@@ -702,12 +705,13 @@ async function startNrepl(): Promise<void> {
     out.show(true);
     out.appendLine(`Starting nREPL server: ${lpy} --nrepl`);
 
-    nreplProcess = spawn(lpy, ['--nrepl'], { cwd });
+    const proc = spawn(lpy, ['--nrepl'], { cwd });
+    nreplProcess = proc;
 
     // Parse port from stdout: "nREPL server started on 127.0.0.1:PORT"
     const portPromise = new Promise<number>((resolve, reject) => {
         const timeout = setTimeout(() => reject(new Error('nREPL server did not start in time')), 10000);
-        nreplProcess!.stdout?.on('data', (data: Buffer) => {
+        proc.stdout?.on('data', (data: Buffer) => {
             const text = data.toString();
             out.append(text);
             const match = text.match(/started on .+:(\d+)/);
@@ -716,19 +720,20 @@ async function startNrepl(): Promise<void> {
                 resolve(parseInt(match[1], 10));
             }
         });
-        nreplProcess!.on('exit', () => {
+        proc.on('exit', () => {
             clearTimeout(timeout);
             reject(new Error('nREPL server exited before starting'));
         });
     });
 
-    nreplProcess.stderr?.on('data', (data: Buffer) => {
+    proc.stderr?.on('data', (data: Buffer) => {
         out.append(data.toString());
     });
-    nreplProcess.on('exit', (code) => {
+    // Status is nreplConn's alone: the server dying closes its socket, which reports it.
+    proc.on('exit', (code) => {
         out.appendLine(`nREPL server exited (code ${code})`);
-        nreplProcess = undefined;
-        updateNreplStatus(false);
+        // A late exit of a replaced server must not forget its successor.
+        if (nreplProcess === proc) nreplProcess = undefined;
     });
 
     try {
@@ -775,29 +780,9 @@ function nreplEval(code: string): Promise<{ value?: string; stdout?: string; err
 
 /** Send an arbitrary JSON request to the nREPL and return the parsed response. */
 function nreplRequest(msg: Record<string, unknown>): Promise<any> {
-    return new Promise((resolve, reject) => {
-        const sock = nreplConn.socket;
-        if (!sock || sock.destroyed) {
-            reject(new Error('nREPL not connected'));
-            return;
-        }
-
-        let buf = '';
-        const onData = (data: Buffer) => {
-            buf += data.toString();
-            const newlineIdx = buf.indexOf('\n');
-            if (newlineIdx >= 0) {
-                sock.removeListener('data', onData);
-                try {
-                    resolve(JSON.parse(buf.slice(0, newlineIdx)));
-                } catch (e) {
-                    reject(e);
-                }
-            }
-        };
-        sock.on('data', onData);
-        sock.write(JSON.stringify(msg) + '\n');
-    });
+    const sock = nreplConn.socket;
+    if (!sock) return Promise.reject(new Error('nREPL not connected'));
+    return nreplRequestOn(sock, msg);
 }
 
 async function evalAndShow(code: string, editor: vscode.TextEditor, range: [number, number]): Promise<void> {
@@ -1131,6 +1116,9 @@ export async function activate(context: vscode.ExtensionContext) {
         vscode.commands.registerCommand('lispython.newlineAndIndent', newlineAndIndent),
         vscode.commands.registerCommand('lispython.reindentLines', reindentLines),
     );
+
+    trackLispyEditor(vscode.window.activeTextEditor);
+    context.subscriptions.push(vscode.window.onDidChangeActiveTextEditor(trackLispyEditor));
 
     // Status bar
     createStatusBar(context);

@@ -83,6 +83,76 @@ export function findNreplPortFor(
     return undefined;
 }
 
+/**
+ * The file the nREPL commands act for. A focused non-file editor means none; no focused
+ * text editor (e.g. the REPL webview has focus) means the last LisPython file in focus.
+ */
+export function resolveActiveFile(
+    editor: { scheme: string; fsPath: string } | undefined,
+    lastLispyFile: string | undefined,
+): string | undefined {
+    if (editor === undefined) return lastLispyFile;
+    return editor.scheme === 'file' ? editor.fsPath : undefined;
+}
+
+/**
+ * Where the nREPL lives: the active file's workspace folder, else folder 0. A file outside
+ * every workspace folder counts only when no folder is open. startNrepl spawns the server
+ * in `folder` (so it writes .nrepl-port there) and the connect command searches from
+ * `activeFile`, else across the folders, so both agree on one location.
+ */
+export function chooseNreplHome(
+    activeFile: string | undefined,
+    owningFolder: string | undefined,
+    folders: readonly string[],
+): { activeFile: string | undefined; folder: string | undefined } {
+    if (activeFile !== undefined && owningFolder !== undefined) return { activeFile, folder: owningFolder };
+    if (folders.length > 0) return { activeFile: undefined, folder: folders[0] };
+    if (activeFile !== undefined) return { activeFile, folder: path.dirname(activeFile) };
+    return { activeFile: undefined, folder: undefined };
+}
+
+/**
+ * Send one newline-delimited JSON request on `sock` and resolve with the first response
+ * line. Rejects if the socket errors or closes first (e.g. the server died or the
+ * connection was swapped), so a caller never waits forever; every listener is removed
+ * once the request settles.
+ */
+export function nreplRequestOn(sock: net.Socket, msg: Record<string, unknown>): Promise<any> {
+    return new Promise((resolve, reject) => {
+        if (sock.destroyed) {
+            reject(new Error('nREPL not connected'));
+            return;
+        }
+        let buf = '';
+        const cleanup = () => {
+            sock.removeListener('data', onData);
+            sock.removeListener('close', onClose);
+            sock.removeListener('error', onError);
+        };
+        const onData = (data: Buffer) => {
+            buf += data.toString();
+            const newlineIdx = buf.indexOf('\n');
+            if (newlineIdx < 0) return;
+            cleanup();
+            try {
+                resolve(JSON.parse(buf.slice(0, newlineIdx)));
+            } catch (e) {
+                reject(e);
+            }
+        };
+        const onClose = () => {
+            cleanup();
+            reject(new Error('nREPL connection closed'));
+        };
+        const onError = onClose;
+        sock.on('data', onData);
+        sock.on('close', onClose);
+        sock.on('error', onError);
+        sock.write(JSON.stringify(msg) + '\n');
+    });
+}
+
 /** Rejection reason of a connect() superseded by a later connect() or by disconnect(). */
 export class NreplConnectCancelled extends Error {
     constructor() {
