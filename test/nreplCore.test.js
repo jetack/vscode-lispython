@@ -373,3 +373,27 @@ test('nreplRequestOn keeps a multi-byte character split across reads', async (t)
     assert.deepStrictEqual(await core.nreplRequestOn(sock, { op: 'eval', code: '1' }), { value: '한국어' });
     assert.strictEqual(chunks, 2, 'the response must really arrive in two reads');
 });
+
+test('startNreplServer rejects at once when the binary cannot be spawned', async () => {
+    const bin = 'lpy-does-not-exist-xyz';
+    const t0 = Date.now();
+    const { port } = core.startNreplServer(bin, process.cwd(), { onStdout() {}, onStderr() {} });
+    await assert.rejects(port, (err) => err.message.includes(bin) && err.message.includes('ENOENT'));
+    assert.ok(Date.now() - t0 < 2000, 'must not wait for the start timeout');
+    // A leftover 10 s start timer would keep the test process alive past this file's end.
+});
+
+test('startNreplServer resolves the port from the server banner', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'fakelpy-'));
+    const fake = path.join(dir, 'lpy');
+    fs.writeFileSync(fake, '#!/bin/sh\necho "nREPL server started on 127.0.0.1:1234"\nexec sleep 30\n', { mode: 0o755 });
+    const seen = [];
+    const started = core.startNreplServer(fake, process.cwd(), { onStdout: (t) => seen.push(t), onStderr() {} });
+    try {
+        assert.strictEqual(await started.port, 1234);
+        assert.ok(seen.join('').includes('started on'));
+    } finally {
+        started.proc.kill();
+        fs.rmSync(dir, { recursive: true });
+    }
+});

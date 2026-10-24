@@ -5,6 +5,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as crypto from 'crypto';
 import * as net from 'net';
+import { spawn, ChildProcess } from 'child_process';
 
 // Mirrors lpy-mode's kind table; vscode has no macro kind, so macros read as functions.
 export const COMPLETION_KINDS: Record<string, keyof typeof CompletionItemKind> = {
@@ -362,4 +363,48 @@ export function getReplHtml(nonce: string, cspSource: string): string {
 </script>
 </body>
 </html>`;
+}
+
+export const NREPL_START_TIMEOUT_MS = 10000;
+
+export interface NreplServerHandlers {
+    onStdout(text: string): void;
+    onStderr(text: string): void;
+}
+
+// Spawns `<lpy> --nrepl` and resolves `port` from its "started on host:PORT" line.
+// Every settle path (port found, exit, spawn error) clears the timer, so none is
+// left pending. Without the 'error' listener a missing binary (ENOENT) or EACCES
+// would be unhandled and only surface as the start timeout.
+export function startNreplServer(
+    lpy: string,
+    cwd: string,
+    handlers: NreplServerHandlers,
+): { proc: ChildProcess; port: Promise<number> } {
+    const proc = spawn(lpy, ['--nrepl'], { cwd });
+    // Decoder per stream, not per chunk, so a character split across reads survives.
+    proc.stdout?.setEncoding('utf8');
+    proc.stderr?.setEncoding('utf8');
+    const port = new Promise<number>((resolve, reject) => {
+        const timeout = setTimeout(
+            () => reject(new Error('nREPL server did not start in time')), NREPL_START_TIMEOUT_MS);
+        proc.stdout?.on('data', (text: string) => {
+            handlers.onStdout(text);
+            const match = text.match(/started on .+:(\d+)/);
+            if (match) {
+                clearTimeout(timeout);
+                resolve(parseInt(match[1], 10));
+            }
+        });
+        proc.stderr?.on('data', (text: string) => handlers.onStderr(text));
+        proc.on('exit', () => {
+            clearTimeout(timeout);
+            reject(new Error('nREPL server exited before starting'));
+        });
+        proc.on('error', (err) => {
+            clearTimeout(timeout);
+            reject(new Error(`Failed to start nREPL server '${lpy}': ${err.message}`));
+        });
+    });
+    return { proc, port };
 }

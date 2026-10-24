@@ -1,7 +1,7 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
 import * as fs from 'fs';
-import { execFile, ChildProcess, spawn } from 'child_process';
+import { execFile, ChildProcess } from 'child_process';
 import {
     CloseAction,
     ErrorAction,
@@ -12,6 +12,7 @@ import {
 import {
     chooseNreplHome, completionKindName, findNreplPortFor, getReplHtml, makeNonce, NREPL_PORT_FILE,
     NreplConnectCancelled, NreplConnection, nreplRequestOn, openFileWarning, resolveActiveFile,
+    startNreplServer,
 } from './nreplCore';
 
 let client: LanguageClient | undefined;
@@ -705,31 +706,14 @@ async function startNrepl(): Promise<void> {
     out.show(true);
     out.appendLine(`Starting nREPL server: ${lpy} --nrepl`);
 
-    const proc = spawn(lpy, ['--nrepl'], { cwd });
-    nreplProcess = proc;
-    // Decoder per stream, not per chunk, so a character split across reads survives.
-    proc.stdout?.setEncoding('utf8');
-    proc.stderr?.setEncoding('utf8');
-
-    // Parse port from stdout: "nREPL server started on 127.0.0.1:PORT"
-    const portPromise = new Promise<number>((resolve, reject) => {
-        const timeout = setTimeout(() => reject(new Error('nREPL server did not start in time')), 10000);
-        proc.stdout?.on('data', (text: string) => {
-            out.append(text);
-            const match = text.match(/started on .+:(\d+)/);
-            if (match) {
-                clearTimeout(timeout);
-                resolve(parseInt(match[1], 10));
-            }
-        });
-        proc.on('exit', () => {
-            clearTimeout(timeout);
-            reject(new Error('nREPL server exited before starting'));
-        });
+    const { proc, port: portPromise } = startNreplServer(lpy, cwd, {
+        onStdout: (text) => out.append(text),
+        onStderr: (text) => out.append(text),
     });
-
-    proc.stderr?.on('data', (data: string) => {
-        out.append(data);
+    nreplProcess = proc;
+    // A failed spawn never emits 'exit'; drop the dead process here.
+    proc.on('error', () => {
+        if (nreplProcess === proc) nreplProcess = undefined;
     });
     // Status is nreplConn's alone: the server dying closes its socket, which reports it.
     proc.on('exit', (code) => {
@@ -745,6 +729,7 @@ async function startNrepl(): Promise<void> {
     } catch (err) {
         if (err instanceof NreplConnectCancelled) return;
         const msg = err instanceof Error ? err.message : String(err);
+        out.appendLine(msg);
         vscode.window.showErrorMessage(msg);
     }
 }
