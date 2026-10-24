@@ -84,15 +84,18 @@ export function findNreplPortFor(
 }
 
 /**
- * The file the nREPL commands act for. A focused non-file editor means none; no focused
- * text editor (e.g. the REPL webview has focus) means the last LisPython file in focus.
+ * The file the nREPL commands act for. A focused file editor is it; a focused untitled
+ * editor is a deliberate choice of no file. With no text editor focused (e.g. the REPL
+ * webview) or a virtual one (the nREPL output channel, git/diff views), the user is still
+ * working on the last LisPython file in focus.
  */
 export function resolveActiveFile(
     editor: { scheme: string; fsPath: string } | undefined,
     lastLispyFile: string | undefined,
 ): string | undefined {
-    if (editor === undefined) return lastLispyFile;
-    return editor.scheme === 'file' ? editor.fsPath : undefined;
+    if (editor?.scheme === 'file') return editor.fsPath;
+    if (editor?.scheme === 'untitled') return undefined;
+    return lastLispyFile;
 }
 
 /**
@@ -145,7 +148,10 @@ export function nreplRequestOn(sock: net.Socket, msg: Record<string, unknown>): 
             cleanup();
             reject(new Error('nREPL connection closed'));
         };
-        const onError = onClose;
+        const onError = (err: Error) => {
+            cleanup();
+            reject(new Error(`nREPL connection error: ${err.message}`));
+        };
         sock.on('data', onData);
         sock.on('close', onClose);
         sock.on('error', onError);

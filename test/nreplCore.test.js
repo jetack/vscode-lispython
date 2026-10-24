@@ -160,10 +160,13 @@ test('chooseNreplHome: owning folder, else folder 0, else the loose file', () =>
         { activeFile: undefined, folder: undefined });
 });
 
-test('resolveActiveFile: falls back to the last LisPython file only when no editor has focus', () => {
+test('resolveActiveFile: falls back to the last LisPython file unless a file or untitled editor has focus', () => {
     assert.strictEqual(core.resolveActiveFile(undefined, '/w/B/x.lpy'), '/w/B/x.lpy');
     assert.strictEqual(core.resolveActiveFile({ scheme: 'file', fsPath: '/w/A/y.py' }, '/w/B/x.lpy'), '/w/A/y.py');
     assert.strictEqual(core.resolveActiveFile({ scheme: 'untitled', fsPath: 'Untitled-1' }, '/w/B/x.lpy'), undefined);
+    // Virtual documents (the nREPL output channel, git/diff views) keep the last LisPython file.
+    assert.strictEqual(core.resolveActiveFile({ scheme: 'output', fsPath: 'extension-output-1' }, '/w/B/x.lpy'), '/w/B/x.lpy');
+    assert.strictEqual(core.resolveActiveFile({ scheme: 'git', fsPath: '/w/A/y.lpy' }, '/w/B/x.lpy'), '/w/B/x.lpy');
     assert.strictEqual(core.resolveActiveFile(undefined, undefined), undefined);
 });
 
@@ -292,8 +295,10 @@ test('NreplConnection: the server closing the current socket reports disconnecte
     const a = await listen(t);
     const statuses = [];
     const conn = connection(t, statuses);
-    a.once('connection', (s) => setImmediate(() => s.destroy()));
+    const accepted = new Promise((r) => a.once('connection', r));
     await conn.connect(a.address().port);
+    assert.deepStrictEqual(statuses, [true]);
+    (await accepted).destroy();
     await waitFor(() => conn.socket === undefined, 'current socket to clear');
     assert.deepStrictEqual(statuses, [true, false]);
 });
@@ -329,5 +334,26 @@ test('nreplRequestOn rejects when the server closes the socket mid-request', asy
     ]);
     assert.strictEqual(outcome, 'nREPL connection closed');
     assert.deepStrictEqual(requestListeners(sock), before);
+});
+
+test('nreplRequestOn reports the socket error that ended the request', async (t) => {
+    const a = await listen(t);
+    a.on('connection', (s) => s.on('data', () => s.resetAndDestroy()));
+    const sock = await clientTo(t, a);
+    const err = await core.nreplRequestOn(sock, { op: 'eval', code: '1' }).then(() => undefined, (e) => e);
+    assert.strictEqual(err?.message, 'nREPL connection error: read ECONNRESET');
+});
+
+test('nreplRequestOn joins a response line split across writes', async (t) => {
+    const a = await listen(t);
+    a.on('connection', (s) => s.once('data', () => {
+        s.write('{"value": "sp');
+        setTimeout(() => s.write('lit"}\n'), 50);
+    }));
+    const sock = await clientTo(t, a);
+    let chunks = 0;
+    sock.on('data', () => chunks++);
+    assert.deepStrictEqual(await core.nreplRequestOn(sock, { op: 'eval', code: '1' }), { value: 'split' });
+    assert.strictEqual(chunks, 2, 'the response must really arrive in two reads');
 });
 
