@@ -10,6 +10,7 @@ import {
     LanguageClientOptions,
     ServerOptions,
 } from 'vscode-languageclient/node';
+import { completionKindName, findNreplPort, NREPL_PORT_FILE } from './nreplCore';
 
 let client: LanguageClient | undefined;
 let statusBarItem: vscode.StatusBarItem;
@@ -704,6 +705,8 @@ function connectNrepl(port: number): Promise<void> {
             reject(err);
         });
         sock.on('close', () => {
+            // A replaced socket's late close must not clear its successor.
+            if (nreplSocket !== sock) return;
             nreplSocket = undefined;
             updateNreplStatus(false);
         });
@@ -781,6 +784,29 @@ async function startNrepl(): Promise<void> {
     } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         vscode.window.showErrorMessage(msg);
+    }
+}
+
+async function connectNreplFromPortFile(): Promise<void> {
+    const cwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+    if (!cwd) {
+        vscode.window.showInformationMessage('Open a folder to look for .nrepl-port.');
+        return;
+    }
+    const port = findNreplPort(cwd);
+    if (port === undefined) {
+        const pick = await vscode.window.showInformationMessage(
+            `No valid ${NREPL_PORT_FILE} found at or above ${cwd}.`, 'Start nREPL Server');
+        if (pick) await startNrepl();
+        return;
+    }
+    // Not disconnectNrepl(): that would kill a server this extension spawned, which wrote this very file.
+    // connectNrepl drops any existing socket itself.
+    try {
+        await connectNrepl(port);
+    } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        vscode.window.showErrorMessage(`nREPL on port ${port} (from ${NREPL_PORT_FILE}) unreachable: ${msg}`);
     }
 }
 
@@ -978,7 +1004,8 @@ class NreplCompletionProvider implements vscode.CompletionItemProvider {
                 return undefined;
             }
             return result.completions.map((name: string) => {
-                const item = new vscode.CompletionItem(name, vscode.CompletionItemKind.Function);
+                const item = new vscode.CompletionItem(
+                    name, vscode.CompletionItemKind[completionKindName(result.kinds, name)]);
                 // Replace the prefix range so the completion replaces what was typed
                 item.range = new vscode.Range(
                     position.line, start,
@@ -1124,6 +1151,7 @@ export async function activate(context: vscode.ExtensionContext) {
         vscode.commands.registerCommand('lispython.sendLastSexp', sendLastSexp),
         vscode.commands.registerCommand('lispython.sendTopLevelForm', sendTopLevelForm),
         vscode.commands.registerCommand('lispython.startNrepl', startNrepl),
+        vscode.commands.registerCommand('lispython.connectNrepl', connectNreplFromPortFile),
         vscode.commands.registerCommand('lispython.disconnectNrepl', disconnectNrepl),
         vscode.commands.registerCommand('lispython.loadFileToRepl', loadFileToRepl),
         vscode.commands.registerCommand('lispython.macroexpand', macroexpand),

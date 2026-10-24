@@ -58,6 +58,10 @@
         "icon": "$(server-process)"
       },
       {
+        "command": "lispython.connectNrepl",
+        "title": "LisPython: Connect to nREPL (.nrepl-port)"
+      },
+      {
         "command": "lispython.disconnectNrepl",
         "title": "LisPython: Disconnect nREPL"
       },
@@ -188,7 +192,8 @@
     "vscode:prepublish": "npm run compile",
     "compile": "tsc -p ./",
     "watch": "tsc -watch -p ./",
-    "lint": "eslint src --ext ts"
+    "lint": "eslint src --ext ts",
+    "test": "tsc -p ./ && node --test test/*.test.js"
   },
   "devDependencies": {
     "@types/node": "^18.0.0",
