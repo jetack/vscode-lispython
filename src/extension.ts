@@ -1,7 +1,6 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
 import * as fs from 'fs';
-import * as net from 'net';
 import { execFile, ChildProcess, spawn } from 'child_process';
 import {
     CloseAction,
@@ -10,7 +9,10 @@ import {
     LanguageClientOptions,
     ServerOptions,
 } from 'vscode-languageclient/node';
-import { completionKindName, findNreplPort, getReplHtml, makeNonce, NREPL_PORT_FILE, openFileWarning } from './nreplCore';
+import {
+    completionKindName, findNreplPortFor, getReplHtml, makeNonce, NREPL_PORT_FILE,
+    NreplConnectCancelled, NreplConnection, openFileWarning,
+} from './nreplCore';
 
 let client: LanguageClient | undefined;
 let statusBarItem: vscode.StatusBarItem;
@@ -548,10 +550,10 @@ async function sendTopLevelForm(): Promise<void> {
 
 async function sendTextToRepl(text: string, editor?: vscode.TextEditor, range?: [number, number]): Promise<void> {
     if (!editor || !range) return;
-    if (!nreplSocket || nreplSocket.destroyed) {
+    if (!nreplConnected()) {
         await startNrepl();
     }
-    if (nreplSocket && !nreplSocket.destroyed) {
+    if (nreplConnected()) {
         evalAndShow(text, editor, range);
     }
 }
@@ -570,7 +572,7 @@ function flashRange(editor: vscode.TextEditor, range: [number, number]): void {
 // nREPL client
 // ---------------------------------------------------------------------------
 
-let nreplSocket: net.Socket | undefined;
+const nreplConn = new NreplConnection((connected) => updateNreplStatus(connected));
 let nreplProcess: ChildProcess | undefined;
 let nreplOutputChannel: vscode.OutputChannel | undefined;
 let nreplStatusItem: vscode.StatusBarItem | undefined;
@@ -646,40 +648,33 @@ function updateNreplStatus(connected: boolean): void {
     nreplStatusItem.show();
 }
 
-function connectNrepl(port: number): Promise<void> {
-    return new Promise((resolve, reject) => {
-        if (nreplSocket) {
-            nreplSocket.destroy();
-            nreplSocket = undefined;
-        }
-        const sock = new net.Socket();
-        sock.connect(port, '127.0.0.1', () => {
-            nreplSocket = sock;
-            updateNreplStatus(true);
-            getNreplOutputChannel().appendLine(`Connected to nREPL on port ${port}`);
-            resolve();
-        });
-        sock.on('error', (err) => {
-            updateNreplStatus(false);
-            reject(err);
-        });
-        sock.on('close', () => {
-            // A replaced socket's late close must not clear its successor.
-            if (nreplSocket !== sock) return;
-            nreplSocket = undefined;
-            updateNreplStatus(false);
-        });
-    });
+function nreplConnected(): boolean {
+    const sock = nreplConn.socket;
+    return sock !== undefined && !sock.destroyed;
+}
+
+/**
+ * Where the nREPL lives for the active file: the active file's workspace folder, else
+ * folder 0. A file outside every workspace folder counts only when no folder is open.
+ * startNrepl spawns the server in `folder` (so it writes .nrepl-port there) and
+ * connectNreplFromPortFile searches from `activeFile`, else across the folders, which
+ * keeps the two sites agreeing on one location.
+ */
+function nreplHome(): { activeFile: string | undefined; folder: string | undefined } {
+    const uri = vscode.window.activeTextEditor?.document.uri;
+    const file = uri?.scheme === 'file' ? uri : undefined;
+    const owner = file && vscode.workspace.getWorkspaceFolder(file);
+    if (file && owner) return { activeFile: file.fsPath, folder: owner.uri.fsPath };
+    const first = vscode.workspace.workspaceFolders?.[0];
+    if (first) return { activeFile: undefined, folder: first.uri.fsPath };
+    if (file) return { activeFile: file.fsPath, folder: path.dirname(file.fsPath) };
+    return { activeFile: undefined, folder: undefined };
 }
 
 function disconnectNrepl(): Promise<void> {
-    if (nreplSocket) {
-        nreplSocket.destroy();
-        nreplSocket = undefined;
-    }
+    nreplConn.disconnect();
     const proc = nreplProcess;
     nreplProcess = undefined;
-    updateNreplStatus(false);
     if (!proc || proc.exitCode !== null) {
         return Promise.resolve();
     }
@@ -701,7 +696,7 @@ async function startNrepl(): Promise<void> {
     }
 
     const lpy = getLpyCommand();
-    const cwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? process.cwd();
+    const cwd = nreplHome().folder ?? process.cwd();
 
     const out = getNreplOutputChannel();
     out.show(true);
@@ -738,34 +733,39 @@ async function startNrepl(): Promise<void> {
 
     try {
         const port = await portPromise;
-        await connectNrepl(port);
-        out.appendLine(`Connected on port ${port}`);
+        await nreplConn.connect(port);
+        out.appendLine(`Connected to nREPL on port ${port}`);
     } catch (err) {
+        if (err instanceof NreplConnectCancelled) return;
         const msg = err instanceof Error ? err.message : String(err);
         vscode.window.showErrorMessage(msg);
     }
 }
 
 async function connectNreplFromPortFile(): Promise<void> {
-    const cwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
-    if (!cwd) {
-        vscode.window.showInformationMessage('Open a folder to look for .nrepl-port.');
+    const { activeFile } = nreplHome();
+    const folders = (vscode.workspace.workspaceFolders ?? []).map((f) => f.uri.fsPath);
+    if (activeFile === undefined && folders.length === 0) {
+        vscode.window.showInformationMessage(`Open a folder or file to look for ${NREPL_PORT_FILE}.`);
         return;
     }
-    const port = findNreplPort(cwd);
-    if (port === undefined) {
+    const found = findNreplPortFor(activeFile, folders);
+    if (found === undefined) {
+        const where = activeFile !== undefined ? path.dirname(activeFile) : folders.join(', ');
         const pick = await vscode.window.showInformationMessage(
-            `No valid ${NREPL_PORT_FILE} found at or above ${cwd}.`, 'Start nREPL Server');
+            `No valid ${NREPL_PORT_FILE} found at or above ${where}.`, 'Start nREPL Server');
         if (pick) await startNrepl();
         return;
     }
     // Not disconnectNrepl(): that would kill a server this extension spawned, which wrote this very file.
-    // connectNrepl drops any existing socket itself.
+    // nreplConn swaps sockets only once the new one connects, so a stale port leaves a live session intact.
     try {
-        await connectNrepl(port);
+        await nreplConn.connect(found.port);
+        getNreplOutputChannel().appendLine(`Connected to nREPL on port ${found.port} (from ${found.file})`);
     } catch (err) {
+        if (err instanceof NreplConnectCancelled) return;
         const msg = err instanceof Error ? err.message : String(err);
-        vscode.window.showErrorMessage(`nREPL on port ${port} (from ${NREPL_PORT_FILE}) unreachable: ${msg}`);
+        vscode.window.showErrorMessage(`nREPL on port ${found.port} (from ${found.file}) unreachable: ${msg}`);
     }
 }
 
@@ -776,7 +776,8 @@ function nreplEval(code: string): Promise<{ value?: string; stdout?: string; err
 /** Send an arbitrary JSON request to the nREPL and return the parsed response. */
 function nreplRequest(msg: Record<string, unknown>): Promise<any> {
     return new Promise((resolve, reject) => {
-        if (!nreplSocket || nreplSocket.destroyed) {
+        const sock = nreplConn.socket;
+        if (!sock || sock.destroyed) {
             reject(new Error('nREPL not connected'));
             return;
         }
@@ -786,7 +787,7 @@ function nreplRequest(msg: Record<string, unknown>): Promise<any> {
             buf += data.toString();
             const newlineIdx = buf.indexOf('\n');
             if (newlineIdx >= 0) {
-                nreplSocket!.removeListener('data', onData);
+                sock.removeListener('data', onData);
                 try {
                     resolve(JSON.parse(buf.slice(0, newlineIdx)));
                 } catch (e) {
@@ -794,8 +795,8 @@ function nreplRequest(msg: Record<string, unknown>): Promise<any> {
                 }
             }
         };
-        nreplSocket.on('data', onData);
-        nreplSocket.write(JSON.stringify(msg) + '\n');
+        sock.on('data', onData);
+        sock.write(JSON.stringify(msg) + '\n');
     });
 }
 
@@ -865,10 +866,10 @@ async function loadFileToRepl(): Promise<void> {
     const filePath = editor.document.uri.fsPath;
 
     // Auto-start nREPL if not connected
-    if (!nreplSocket || nreplSocket.destroyed) {
+    if (!nreplConnected()) {
         await startNrepl();
     }
-    if (!nreplSocket || nreplSocket.destroyed) {
+    if (!nreplConnected()) {
         vscode.window.showErrorMessage('Could not connect to nREPL.');
         return;
     }
@@ -911,10 +912,10 @@ async function macroexpand(): Promise<void> {
     flashRange(editor, range);
 
     // Auto-start nREPL if not connected
-    if (!nreplSocket || nreplSocket.destroyed) {
+    if (!nreplConnected()) {
         await startNrepl();
     }
-    if (!nreplSocket || nreplSocket.destroyed) {
+    if (!nreplConnected()) {
         vscode.window.showErrorMessage('Could not connect to nREPL.');
         return;
     }
@@ -942,7 +943,7 @@ class NreplCompletionProvider implements vscode.CompletionItemProvider {
         _token: vscode.CancellationToken,
     ): Promise<vscode.CompletionItem[] | undefined> {
         // Only provide completions when nREPL is connected
-        if (!nreplSocket || nreplSocket.destroyed) {
+        if (!nreplConnected()) {
             return undefined;
         }
 
