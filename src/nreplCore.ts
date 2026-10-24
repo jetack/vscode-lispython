@@ -4,6 +4,7 @@ import type { CompletionItemKind } from 'vscode';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as crypto from 'crypto';
+import * as net from 'net';
 
 // Mirrors lpy-mode's kind table; vscode has no macro kind, so macros read as functions.
 export const COMPLETION_KINDS: Record<string, keyof typeof CompletionItemKind> = {
@@ -40,19 +41,200 @@ export function parsePortFile(text: string): number | undefined {
 
 export const NREPL_PORT_FILE = '.nrepl-port';
 
-/** Look for `.nrepl-port` in `startDir` and each parent directory. */
-export function findNreplPort(startDir: string): number | undefined {
+/**
+ * Look for `.nrepl-port` in `startDir` and each parent directory. Returns the nearest
+ * file found, with `port` undefined when that file is malformed.
+ */
+function locateNreplPortFile(startDir: string): { file: string; port: number | undefined } | undefined {
     let dir = path.resolve(startDir);
     for (;;) {
+        const file = path.join(dir, NREPL_PORT_FILE);
         let text: string | undefined;
         try {
-            text = fs.readFileSync(path.join(dir, NREPL_PORT_FILE), 'utf8');
+            text = fs.readFileSync(file, 'utf8');
         } catch { /* absent or unreadable: keep walking up */ }
         // The nearest file wins; a malformed one must not fall through to an unrelated server above.
-        if (text !== undefined) return parsePortFile(text);
+        if (text !== undefined) return { file, port: parsePortFile(text) };
         const parent = path.dirname(dir);
         if (parent === dir) return undefined;
         dir = parent;
+    }
+}
+
+/** Look for `.nrepl-port` in `startDir` and each parent directory. */
+export function findNreplPort(startDir: string): number | undefined {
+    return locateNreplPortFile(startDir)?.port;
+}
+
+/**
+ * The `.nrepl-port` to connect to. With an active file, only the search upward from its
+ * directory counts, so a sibling root's server is never picked for it; otherwise each
+ * workspace folder is searched in order and the first valid port wins.
+ */
+export function findNreplPortFor(
+    activeFile: string | undefined,
+    folders: readonly string[],
+): { port: number; file: string } | undefined {
+    const starts = activeFile !== undefined ? [path.dirname(activeFile)] : folders;
+    for (const start of starts) {
+        const found = locateNreplPortFile(start);
+        if (found?.port !== undefined) return { port: found.port, file: found.file };
+    }
+    return undefined;
+}
+
+/**
+ * The file the nREPL commands act for. A focused file editor is it; a focused untitled
+ * editor is a deliberate choice of no file. With no text editor focused (e.g. the REPL
+ * webview) or a virtual one (the nREPL output channel, git/diff views), the user is still
+ * working on the last LisPython file in focus.
+ */
+export function resolveActiveFile(
+    editor: { scheme: string; fsPath: string } | undefined,
+    lastLispyFile: string | undefined,
+): string | undefined {
+    if (editor?.scheme === 'file') return editor.fsPath;
+    if (editor?.scheme === 'untitled') return undefined;
+    return lastLispyFile;
+}
+
+/**
+ * Where the nREPL lives: the active file's workspace folder, else folder 0. A file outside
+ * every workspace folder counts only when no folder is open. startNrepl spawns the server
+ * in `folder` (so it writes .nrepl-port there) and the connect command searches from
+ * `activeFile`, else across the folders, so both agree on one location.
+ */
+export function chooseNreplHome(
+    activeFile: string | undefined,
+    owningFolder: string | undefined,
+    folders: readonly string[],
+): { activeFile: string | undefined; folder: string | undefined } {
+    if (activeFile !== undefined && owningFolder !== undefined) return { activeFile, folder: owningFolder };
+    if (folders.length > 0) return { activeFile: undefined, folder: folders[0] };
+    if (activeFile !== undefined) return { activeFile, folder: path.dirname(activeFile) };
+    return { activeFile: undefined, folder: undefined };
+}
+
+/**
+ * Send one newline-delimited JSON request on `sock` and resolve with the first response
+ * line. Rejects if the socket errors or closes first (e.g. the server died or the
+ * connection was swapped), so a caller never waits forever; every listener is removed
+ * once the request settles.
+ */
+export function nreplRequestOn(sock: net.Socket, msg: Record<string, unknown>): Promise<any> {
+    return new Promise((resolve, reject) => {
+        if (sock.destroyed) {
+            reject(new Error('nREPL not connected'));
+            return;
+        }
+        let buf = '';
+        const cleanup = () => {
+            sock.removeListener('data', onData);
+            sock.removeListener('close', onClose);
+            sock.removeListener('error', onError);
+        };
+        const onData = (data: Buffer) => {
+            buf += data.toString();
+            const newlineIdx = buf.indexOf('\n');
+            if (newlineIdx < 0) return;
+            cleanup();
+            try {
+                resolve(JSON.parse(buf.slice(0, newlineIdx)));
+            } catch (e) {
+                reject(e);
+            }
+        };
+        const onClose = () => {
+            cleanup();
+            reject(new Error('nREPL connection closed'));
+        };
+        const onError = (err: Error) => {
+            cleanup();
+            reject(new Error(`nREPL connection error: ${err.message}`));
+        };
+        sock.on('data', onData);
+        sock.on('close', onClose);
+        sock.on('error', onError);
+        sock.write(JSON.stringify(msg) + '\n');
+    });
+}
+
+/** Rejection reason of a connect() superseded by a later connect() or by disconnect(). */
+export class NreplConnectCancelled extends Error {
+    constructor() {
+        super('nREPL connect superseded');
+        this.name = 'NreplConnectCancelled';
+    }
+}
+
+/**
+ * The extension's single nREPL socket. A connect opens a new socket as `pending` and
+ * swaps it in only once it has connected, so a stale port (a leftover `.nrepl-port`)
+ * fails without dropping a live session. At most one connect is pending: a newer one
+ * cancels the older, so overlapping connects cannot leak a socket. Status follows the
+ * current socket only; a pending socket's failure never reports "disconnected".
+ */
+export class NreplConnection {
+    private current: net.Socket | undefined;
+    private pending: { sock: net.Socket; reject: (err: Error) => void } | undefined;
+
+    constructor(private readonly onStatus: (connected: boolean) => void) {}
+
+    get socket(): net.Socket | undefined {
+        return this.current;
+    }
+
+    connect(port: number, host = '127.0.0.1'): Promise<void> {
+        this.cancelPending();
+        return new Promise((resolve, reject) => {
+            const sock = new net.Socket();
+            const entry = { sock, reject };
+            this.pending = entry;
+            sock.once('connect', () => {
+                if (this.pending !== entry) {
+                    sock.destroy();
+                    return;
+                }
+                this.pending = undefined;
+                const old = this.current;
+                this.current = sock;
+                old?.destroy();
+                this.onStatus(true);
+                resolve();
+            });
+            // Errors on the current socket surface through its 'close'.
+            sock.on('error', (err) => {
+                if (this.pending !== entry) return;
+                this.pending = undefined;
+                reject(err);
+            });
+            sock.on('close', () => {
+                if (this.pending === entry) {
+                    this.pending = undefined;
+                    reject(new Error('nREPL socket closed before connecting'));
+                }
+                if (this.current !== sock) return;
+                this.current = undefined;
+                this.onStatus(false);
+            });
+            sock.connect(port, host);
+        });
+    }
+
+    disconnect(): void {
+        this.cancelPending();
+        const old = this.current;
+        this.current = undefined;
+        old?.destroy();
+        this.onStatus(false);
+    }
+
+    private cancelPending(): void {
+        const p = this.pending;
+        if (!p) return;
+        this.pending = undefined;
+        p.sock.destroy();
+        p.reject(new NreplConnectCancelled());
     }
 }
 
