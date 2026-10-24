@@ -54,3 +54,36 @@ export function findNreplPort(startDir: string): number | undefined {
         dir = parent;
     }
 }
+
+// escapeHtml and linkifyErrors are injected into the REPL webview script via
+// Function.prototype.toString (see getReplHtml in extension.ts), so they must stay
+// self-contained: linkifyErrors may reference only escapeHtml, by name.
+
+/** Escapes text for both element content and double/single-quoted attribute values. */
+export function escapeHtml(s: string): string {
+    return s
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+}
+
+/**
+ * Escapes an error message and wraps each `File "<path>", line N` in a clickable
+ * span. Matching runs on the raw text so the path is captured unescaped, then every
+ * piece (link text, attribute values, surrounding text) is escaped exactly once.
+ */
+export function linkifyErrors(text: string): string {
+    const re = /File "(.+?)", line (\d+)/g;
+    let out = '';
+    let last = 0;
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(text)) !== null) {
+        out += escapeHtml(text.slice(last, m.index));
+        out += '<span class="file-link" data-file="' + escapeHtml(m[1]) +
+            '" data-line="' + m[2] + '">' + escapeHtml(m[0]) + '</span>';
+        last = m.index + m[0].length;
+    }
+    return out + escapeHtml(text.slice(last));
+}

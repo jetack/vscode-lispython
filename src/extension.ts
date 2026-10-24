@@ -10,7 +10,7 @@ import {
     LanguageClientOptions,
     ServerOptions,
 } from 'vscode-languageclient/node';
-import { completionKindName, findNreplPort, NREPL_PORT_FILE } from './nreplCore';
+import { completionKindName, escapeHtml, findNreplPort, linkifyErrors, NREPL_PORT_FILE } from './nreplCore';
 
 let client: LanguageClient | undefined;
 let statusBarItem: vscode.StatusBarItem;
@@ -678,18 +678,9 @@ function getReplHtml(): string {
     div.scrollIntoView({ behavior: 'smooth' });
   });
 
-  function escapeHtml(s) {
-    return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-  }
+  ${escapeHtml.toString()}
 
-  function linkifyErrors(text) {
-    const escaped = escapeHtml(text);
-    return escaped.replace(
-      /File &quot;(.+?)&quot;, line (\\d+)/g,
-      (match, filePath, lineNo) =>
-        '<span class="file-link" data-file="' + filePath + '" data-line="' + lineNo + '">' + match + '</span>'
-    );
-  }
+  ${linkifyErrors.toString()}
 
   document.addEventListener('click', (e) => {
     const link = e.target.closest('.file-link');

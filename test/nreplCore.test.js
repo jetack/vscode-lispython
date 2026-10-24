@@ -34,3 +34,41 @@ test('findNreplPort walks upward', () => {
     assert.strictEqual(core.findNreplPort(sub), 99);
     fs.rmSync(root, { recursive: true });
 });
+
+const unescapeHtml = (s) => s
+    .replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'").replace(/&amp;/g, '&');
+
+test('escapeHtml covers & < > " \'', () => {
+    assert.strictEqual(core.escapeHtml(`&<>"'`), '&amp;&lt;&gt;&quot;&#39;');
+    assert.strictEqual(core.escapeHtml('&lt;'), '&amp;lt;');
+});
+
+test('linkifyErrors escapes path and text, keeps one intact link', () => {
+    const file = `/tmp/a"b<c>&d'e.py`;
+    const err = `Traceback:\n  File "${file}", line 12, in <module>\nValueError: "x" < 1 & y > 2`;
+    const html = core.linkifyErrors(err);
+
+    const spans = html.match(/<span class="file-link" data-file="([^"]*)" data-line="(\d+)">/g) || [];
+    assert.strictEqual(spans.length, 1, html);
+    assert.strictEqual((html.match(/<\/span>/g) || []).length, 1, html);
+
+    const [, rawFile, line] = html.match(/data-file="([^"]*)" data-line="([^"]*)"/);
+    assert.strictEqual(unescapeHtml(rawFile), file);
+    assert.strictEqual(line, '12');
+
+    // Outside the generated markup, no raw metacharacters survive and entities are well-formed.
+    const text = html.replace(/<span class="file-link" data-file="[^"]*" data-line="\d+">|<\/span>/g, '');
+    assert.doesNotMatch(text, /[<>"']/, text);
+    assert.doesNotMatch(text, /&(?!amp;|lt;|gt;|quot;|#39;)/, text);
+    assert.strictEqual(unescapeHtml(text), err);
+});
+
+test('webview-injected sources are self-contained', () => {
+    // getReplHtml injects these via toString(); they must run with no module scope.
+    const linkify = new Function(
+        `${core.escapeHtml.toString()}\n${core.linkifyErrors.toString()}\nreturn linkifyErrors;`)();
+    const err = 'File "/x/y.py", line 3';
+    assert.strictEqual(linkify(err), core.linkifyErrors(err));
+    assert.match(linkify(err), /data-file="\/x\/y\.py" data-line="3"/);
+});
