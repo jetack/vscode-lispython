@@ -119,7 +119,8 @@ export function chooseNreplHome(
  * Send one newline-delimited JSON request on `sock` and resolve with the first response
  * line. Rejects if the socket errors or closes first (e.g. the server died or the
  * connection was swapped), so a caller never waits forever; every listener is removed
- * once the request settles.
+ * once the request settles. This is the only reader of the socket, so it puts the socket
+ * in utf8 mode once.
  */
 export function nreplRequestOn(sock: net.Socket, msg: Record<string, unknown>): Promise<any> {
     return new Promise((resolve, reject) => {
@@ -127,14 +128,17 @@ export function nreplRequestOn(sock: net.Socket, msg: Record<string, unknown>): 
             reject(new Error('nREPL not connected'));
             return;
         }
+        // One StringDecoder per socket, not per chunk: a multi-byte character split across
+        // reads (or across requests) is carried over instead of decoding to U+FFFD.
+        if (sock.readableEncoding !== 'utf8') sock.setEncoding('utf8');
         let buf = '';
         const cleanup = () => {
             sock.removeListener('data', onData);
             sock.removeListener('close', onClose);
             sock.removeListener('error', onError);
         };
-        const onData = (data: Buffer) => {
-            buf += data.toString();
+        const onData = (data: string) => {
+            buf += data;
             const newlineIdx = buf.indexOf('\n');
             if (newlineIdx < 0) return;
             cleanup();

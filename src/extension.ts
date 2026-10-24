@@ -707,12 +707,14 @@ async function startNrepl(): Promise<void> {
 
     const proc = spawn(lpy, ['--nrepl'], { cwd });
     nreplProcess = proc;
+    // Decoder per stream, not per chunk, so a character split across reads survives.
+    proc.stdout?.setEncoding('utf8');
+    proc.stderr?.setEncoding('utf8');
 
     // Parse port from stdout: "nREPL server started on 127.0.0.1:PORT"
     const portPromise = new Promise<number>((resolve, reject) => {
         const timeout = setTimeout(() => reject(new Error('nREPL server did not start in time')), 10000);
-        proc.stdout?.on('data', (data: Buffer) => {
-            const text = data.toString();
+        proc.stdout?.on('data', (text: string) => {
             out.append(text);
             const match = text.match(/started on .+:(\d+)/);
             if (match) {
@@ -726,8 +728,8 @@ async function startNrepl(): Promise<void> {
         });
     });
 
-    proc.stderr?.on('data', (data: Buffer) => {
-        out.append(data.toString());
+    proc.stderr?.on('data', (data: string) => {
+        out.append(data);
     });
     // Status is nreplConn's alone: the server dying closes its socket, which reports it.
     proc.on('exit', (code) => {

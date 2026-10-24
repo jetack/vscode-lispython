@@ -357,3 +357,19 @@ test('nreplRequestOn joins a response line split across writes', async (t) => {
     assert.strictEqual(chunks, 2, 'the response must really arrive in two reads');
 });
 
+test('nreplRequestOn keeps a multi-byte character split across reads', async (t) => {
+    const bytes = Buffer.from('{"value": "한국어"}\n');
+    const cut = bytes.indexOf(Buffer.from('한')) + 1;
+    const first = bytes.subarray(0, cut);
+    assert.ok(first[first.length - 1] >= 0x80, 'the split must land inside a character');
+    const a = await listen(t);
+    a.on('connection', (s) => s.once('data', () => {
+        s.write(first);
+        setTimeout(() => s.write(bytes.subarray(cut)), 50);
+    }));
+    const sock = await clientTo(t, a);
+    let chunks = 0;
+    sock.on('data', () => chunks++);
+    assert.deepStrictEqual(await core.nreplRequestOn(sock, { op: 'eval', code: '1' }), { value: '한국어' });
+    assert.strictEqual(chunks, 2, 'the response must really arrive in two reads');
+});
