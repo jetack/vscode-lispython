@@ -377,10 +377,27 @@ test('nreplRequestOn keeps a multi-byte character split across reads', async (t)
 test('startNreplServer rejects at once when the binary cannot be spawned', async () => {
     const bin = 'lpy-does-not-exist-xyz';
     const t0 = Date.now();
-    const { port } = core.startNreplServer(bin, process.cwd(), { onStdout() {}, onStderr() {} });
-    await assert.rejects(port, (err) => err.message.includes(bin) && err.message.includes('ENOENT'));
-    assert.ok(Date.now() - t0 < 2000, 'must not wait for the start timeout');
-    // A leftover 10 s start timer would keep the test process alive past this file's end.
+    const origSet = global.setTimeout;
+    const origClear = global.clearTimeout;
+    const startTimers = new Set();
+    const cleared = new Set();
+    global.setTimeout = (fn, ms, ...rest) => {
+        const h = origSet(fn, ms, ...rest);
+        if (ms === 10000) startTimers.add(h);
+        return h;
+    };
+    global.clearTimeout = (h) => { cleared.add(h); return origClear(h); };
+    try {
+        const { port } = core.startNreplServer(bin, process.cwd(), { onStdout() {}, onStderr() {} });
+        await assert.rejects(port, (err) => err.message.includes(bin) && err.message.includes('ENOENT') && err.message.includes(process.cwd()));
+        assert.ok(Date.now() - t0 < 2000, 'must not wait for the start timeout');
+        assert.strictEqual(startTimers.size, 1, 'the 10 s start timer must have been created');
+        for (const h of startTimers) assert.ok(cleared.has(h), 'the start timer must be cleared on the error path');
+    } finally {
+        global.setTimeout = origSet;
+        global.clearTimeout = origClear;
+        for (const h of startTimers) origClear(h);
+    }
 });
 
 test('startNreplServer resolves the port from the server banner', async () => {

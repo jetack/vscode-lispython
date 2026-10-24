@@ -403,7 +403,7 @@ export function startNreplServer(
         });
         proc.on('error', (err) => {
             clearTimeout(timeout);
-            reject(new Error(`Failed to start nREPL server '${lpy}': ${err.message}`));
+            reject(new Error(`Failed to start nREPL server '${lpy}' (cwd '${cwd}'): ${err.message}`));
         });
     });
     return { proc, port };
