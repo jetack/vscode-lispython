@@ -352,20 +352,40 @@ export function neutralizeNotificationLinks(text: string): string {
     return text.replace(/\]\(/g, ']\u200B(');
 }
 
-/** Warning text for a file that could not be opened; the path is untrusted REPL output. */
+/**
+ * Status-bar text for a refused openFile. The status bar renders `$(codicon)` syntax, so
+ * `$(` is broken as well as notification links; the path is untrusted REPL output.
+ */
 export function openFileRefusedMessage(file: unknown): string {
-    return `Not opening "${neutralizeNotificationLinks(String(file))}": outside the workspace or not a .lpy/.py file`;
+    const safe = neutralizeNotificationLinks(String(file)).replace(/\$\(/g, '$​(');
+    return `Not opening "${safe}": not an existing .lpy/.py file inside the workspace`;
 }
 
-// The path comes from untrusted REPL output. Canonicalize it (symlinks, "..") before the
-// containment check, and open the canonical path rather than the original string so the
-// checked file is the opened file (short of a symlink swap racing the check).
+function isInside(root: string, p: string): boolean {
+    const rel = path.relative(root, p);
+    return rel !== '' && rel !== '..' && !rel.startsWith('..' + path.sep) && !path.isAbsolute(rel);
+}
+
+function isUncLike(p: string): boolean {
+    return p.startsWith('\\\\') || p.startsWith('//');
+}
+
+// The path comes from untrusted REPL output. A lexical pre-filter runs before any fs call so
+// a UNC path (SMB/NTLM connection) or a hung mount is never touched unless it already lies
+// under a root. Then canonicalize (symlinks, "..") before the real containment check, and
+// open the canonical path rather than the original string so the checked file is the opened
+// file (short of a symlink swap racing the check).
 export function resolveOpenableFile(
     file: string,
     workspaceRoots: readonly string[],
     allowedExtensions: readonly string[] = ['.lpy', '.py'],
 ): string | undefined {
     if (!path.isAbsolute(file)) { return undefined; }
+    if (!allowedExtensions.includes(path.extname(file).toLowerCase())) { return undefined; }
+    const lexical = path.resolve(file);
+    const candidateRoots = workspaceRoots.filter((root) =>
+        (!isUncLike(file) || isUncLike(root)) && isInside(path.resolve(root), lexical));
+    if (candidateRoots.length === 0) { return undefined; }
     let real: string;
     try {
         real = fs.realpathSync(file);
@@ -374,16 +394,15 @@ export function resolveOpenableFile(
         return undefined;
     }
     if (!allowedExtensions.includes(path.extname(real).toLowerCase())) { return undefined; }
-    for (const root of workspaceRoots) {
+    for (const root of candidateRoots) {
         let realRoot: string;
         try { realRoot = fs.realpathSync(root); } catch { continue; }
-        const rel = path.relative(realRoot, real);
-        if (rel === '' || rel === '..' || rel.startsWith('..' + path.sep) || path.isAbsolute(rel)) { continue; }
-        return real;
+        if (isInside(realRoot, real)) { return real; }
     }
     return undefined;
 }
 
+/** Warning text for a file that could not be opened; the path is untrusted REPL output. */
 export function openFileWarning(file: unknown): string {
     return `Could not open file: "${neutralizeNotificationLinks(String(file))}"`;
 }

@@ -87,53 +87,99 @@ test('openFileWarning defuses notification command links', () => {
     assert.strictEqual(core.openFileWarning(42), 'Could not open file: "42"');
 });
 
-test('openFileRefusedMessage defuses notification command links', () => {
+test('openFileRefusedMessage defuses notification links and codicon syntax', () => {
     const evil = '[x](command:workbench.action.terminal.sendSequence)';
     const msg = core.openFileRefusedMessage(evil);
     assert.ok(!LINK_RE.test(msg));
     assert.ok(msg.startsWith('Not opening "'));
+    assert.ok(!core.openFileRefusedMessage('/a/$(sync)/b.py').includes('$('));
+    assert.ok(core.openFileRefusedMessage('/a/$(sync)/b.py').includes('$​(sync)'));
     assert.strictEqual(core.openFileRefusedMessage('/a/b.txt'),
-        'Not opening "/a/b.txt": outside the workspace or not a .lpy/.py file');
+        'Not opening "/a/b.txt": not an existing .lpy/.py file inside the workspace');
 });
 
-test('resolveOpenableFile only opens .lpy/.py files inside the real workspace', () => {
+// Builds base/{ws/pkg/mod.lpy, ws/pkg/mod.PY, ws/secret.txt, ws2/x.lpy, outside/x.lpy,
+// outside/in.lpy -> ws/pkg/mod.lpy, ws/link.lpy -> outside/x.lpy, ws/linkdir -> outside}.
+function openFileFixture() {
     const base = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'lispy-open-')));
+    const ws = path.join(base, 'ws');
+    const ws2 = path.join(base, 'ws2');
+    const outside = path.join(base, 'outside');
+    for (const d of [path.join(ws, 'pkg'), ws2, outside]) fs.mkdirSync(d, { recursive: true });
+    const w = (p) => { fs.writeFileSync(p, 'x'); return p; };
+    const fx = { base, ws, ws2, outside };
+    fx.lpy = w(path.join(ws, 'pkg', 'mod.lpy'));
+    fx.py = w(path.join(ws, 'pkg', 'mod.PY'));
+    fx.txt = w(path.join(ws, 'secret.txt'));
+    fx.out = w(path.join(outside, 'x.lpy'));
+    fx.sibling = w(path.join(ws2, 'x.lpy'));
+    fs.symlinkSync(fx.lpy, path.join(outside, 'in.lpy'));
+    fs.symlinkSync(fx.out, path.join(ws, 'link.lpy'));
+    fs.symlinkSync(outside, path.join(ws, 'linkdir'));
+    fx.done = () => fs.rmSync(base, { recursive: true });
+    return fx;
+}
+
+test('resolveOpenableFile opens .lpy and .py files inside the workspace', () => {
+    const fx = openFileFixture();
     try {
-        const ws = path.join(base, 'ws');
-        const ws2 = path.join(base, 'ws2');
-        const outside = path.join(base, 'outside');
-        for (const d of [path.join(ws, 'pkg'), ws2, outside]) fs.mkdirSync(d, { recursive: true });
-        const w = (p) => { fs.writeFileSync(p, 'x'); return p; };
-        const lpy = w(path.join(ws, 'pkg', 'mod.lpy'));
-        const py = w(path.join(ws, 'pkg', 'mod.PY'));
-        w(path.join(ws, 'secret.txt'));
-        const out = w(path.join(outside, 'x.lpy'));
-        w(path.join(ws2, 'x.lpy'));
-        fs.symlinkSync(out, path.join(ws, 'link.lpy'));
-        fs.symlinkSync(outside, path.join(ws, 'linkdir'));
-        const roots = [ws];
+        assert.strictEqual(core.resolveOpenableFile(fx.lpy, [fx.ws]), fx.lpy);
+        assert.strictEqual(core.resolveOpenableFile(fx.py, [fx.ws]), fx.py);
+    } finally { fx.done(); }
+});
 
-        assert.strictEqual(core.resolveOpenableFile(lpy, roots), lpy);
-        assert.strictEqual(core.resolveOpenableFile(py, roots), py);
-        assert.strictEqual(core.resolveOpenableFile(out, roots), undefined);
-        assert.strictEqual(core.resolveOpenableFile(ws + '/pkg/../../outside/x.lpy', roots), undefined);
-        assert.strictEqual(core.resolveOpenableFile(path.join(ws, 'link.lpy'), roots), undefined);
-        assert.strictEqual(core.resolveOpenableFile(path.join(ws, 'linkdir', 'x.lpy'), roots), undefined);
-        assert.strictEqual(core.resolveOpenableFile(path.join(ws, 'secret.txt'), roots), undefined);
-        assert.strictEqual(core.resolveOpenableFile('pkg/mod.lpy', roots), undefined);
-        assert.strictEqual(core.resolveOpenableFile(path.join(ws, 'nope.lpy'), roots), undefined);
-        assert.strictEqual(core.resolveOpenableFile(path.join(ws, 'pkg'), roots), undefined);
-        assert.strictEqual(core.resolveOpenableFile(path.join(ws2, 'x.lpy'), roots), undefined);
-        assert.strictEqual(core.resolveOpenableFile(lpy, []), undefined);
+test('resolveOpenableFile refuses a path outside the workspace', () => {
+    const fx = openFileFixture();
+    try {
+        assert.strictEqual(core.resolveOpenableFile(fx.out, [fx.ws]), undefined);
+    } finally { fx.done(); }
+});
 
-        // A root reached through a symlink still admits its files.
-        const rootLink = path.join(base, 'rootlink');
-        fs.symlinkSync(ws, rootLink);
-        assert.strictEqual(core.resolveOpenableFile(lpy, [rootLink]), lpy);
-        assert.strictEqual(core.resolveOpenableFile(path.join(rootLink, 'pkg', 'mod.lpy'), [ws]), lpy);
-    } finally {
-        fs.rmSync(base, { recursive: true });
-    }
+test('resolveOpenableFile refuses a ../ escape', () => {
+    const fx = openFileFixture();
+    try {
+        assert.strictEqual(core.resolveOpenableFile(fx.ws + '/pkg/../../outside/x.lpy', [fx.ws]), undefined);
+    } finally { fx.done(); }
+});
+
+test('resolveOpenableFile refuses symlinks that escape the workspace', () => {
+    const fx = openFileFixture();
+    try {
+        assert.strictEqual(core.resolveOpenableFile(path.join(fx.ws, 'link.lpy'), [fx.ws]), undefined);
+        assert.strictEqual(core.resolveOpenableFile(path.join(fx.ws, 'linkdir', 'x.lpy'), [fx.ws]), undefined);
+    } finally { fx.done(); }
+});
+
+test('resolveOpenableFile refuses other non-openable paths', () => {
+    const fx = openFileFixture();
+    try {
+        assert.strictEqual(core.resolveOpenableFile(fx.txt, [fx.ws]), undefined);
+        assert.strictEqual(core.resolveOpenableFile('pkg/mod.lpy', [fx.ws]), undefined);
+        assert.strictEqual(core.resolveOpenableFile(path.join(fx.ws, 'nope.lpy'), [fx.ws]), undefined);
+        fs.mkdirSync(path.join(fx.ws, 'dir.lpy'));
+        assert.strictEqual(core.resolveOpenableFile(path.join(fx.ws, 'dir.lpy'), [fx.ws]), undefined);
+        assert.strictEqual(core.resolveOpenableFile(fx.sibling, [fx.ws]), undefined);
+        assert.strictEqual(core.resolveOpenableFile(fx.lpy, []), undefined);
+        assert.strictEqual(core.resolveOpenableFile('\\\\host\\share\\x.py', [fx.ws]), undefined);
+        assert.strictEqual(core.resolveOpenableFile('//host/share/x.py', [fx.ws]), undefined);
+    } finally { fx.done(); }
+});
+
+test('resolveOpenableFile admits files under a workspace root that is a symlink', () => {
+    const fx = openFileFixture();
+    try {
+        const rootLink = path.join(fx.base, 'rootlink');
+        fs.symlinkSync(fx.ws, rootLink);
+        assert.strictEqual(core.resolveOpenableFile(path.join(rootLink, 'pkg', 'mod.lpy'), [rootLink]), fx.lpy);
+    } finally { fx.done(); }
+});
+
+test('resolveOpenableFile refuses a path lexically outside every root without resolving symlinks', () => {
+    const fx = openFileFixture();
+    try {
+        // outside/in.lpy resolves into the workspace, but the clicked path is outside it.
+        assert.strictEqual(core.resolveOpenableFile(path.join(fx.outside, 'in.lpy'), [fx.ws]), undefined);
+    } finally { fx.done(); }
 });
 
 test('getReplHtml carries a nonce-based CSP on every script and style tag', () => {
