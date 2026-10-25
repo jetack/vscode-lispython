@@ -417,7 +417,6 @@ function lastSexpBefore(src: string, offset: number): [number, number] | null {
     // Scan backward tracking paren balance in reverse.
     let i = end - 1;
     const stack: string[] = [];
-    let inString = false;
 
     // If we're looking at a close-bracket, jump to its matching open
     const last = src[i];
@@ -758,6 +757,7 @@ function nreplEval(code: string): Promise<{ value?: string; stdout?: string; err
 }
 
 /** Send an arbitrary JSON request to the nREPL and return the parsed response. */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any -- callers read untyped nREPL response fields
 function nreplRequest(msg: Record<string, unknown>): Promise<any> {
     const sock = nreplConn.socket;
     if (!sock) return Promise.reject(new Error('nREPL not connected'));
@@ -904,7 +904,6 @@ class NreplCompletionProvider implements vscode.CompletionItemProvider {
     async provideCompletionItems(
         document: vscode.TextDocument,
         position: vscode.Position,
-        _token: vscode.CancellationToken,
     ): Promise<vscode.CompletionItem[] | undefined> {
         // Only provide completions when nREPL is connected
         if (!nreplConnected()) {
@@ -916,7 +915,7 @@ class NreplCompletionProvider implements vscode.CompletionItemProvider {
         let start = position.character;
         while (start > 0) {
             const ch = lineText[start - 1];
-            if (/[\s()\[\]{}'`,;"]/.test(ch)) break;
+            if (/[\s()[\]{}'`,;"]/.test(ch)) break;
             start--;
         }
         const prefix = lineText.slice(start, position.character);
@@ -991,7 +990,7 @@ function calcIndent(text: string): number {
                 let j = i + 1;
                 while (j < n && text[j] === ' ') j++;
                 const opStart = j;
-                while (j < n && !' \n\t()[]{}\'\"'.includes(text[j])) j++;
+                while (j < n && !' \n\t()[]{}\'"'.includes(text[j])) j++;
                 const op = text.slice(opStart, j);
 
                 if (op === '' || SPECIAL_FORMS.has(op)) {
