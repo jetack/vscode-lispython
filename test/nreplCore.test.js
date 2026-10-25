@@ -574,6 +574,21 @@ test('startNreplServer resolves the port from the server banner', async () => {
     }
 });
 
+test('startNreplServer resolves the port from a banner split across reads', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'fakelpy-'));
+    const fake = path.join(dir, 'lpy');
+    fs.writeFileSync(fake,
+        "#!/bin/sh\nprintf 'nREPL server started on 127.0.0.1:1'\nsleep 0.3\nprintf '234\\n'\nexec sleep 30\n",
+        { mode: 0o755 });
+    const started = core.startNreplServer(fake, process.cwd(), { onStdout() {}, onStderr() {} });
+    try {
+        assert.strictEqual(await started.port, 1234);
+    } finally {
+        started.proc.kill();
+        fs.rmSync(dir, { recursive: true });
+    }
+});
+
 // A fake `lpy` that appends its pid to `spawns` on every launch, then optionally prints
 // the banner, then keeps running like a real server.
 function fakeServer(banner) {
