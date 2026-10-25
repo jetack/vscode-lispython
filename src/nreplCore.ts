@@ -353,6 +353,37 @@ export function neutralizeNotificationLinks(text: string): string {
 }
 
 /** Warning text for a file that could not be opened; the path is untrusted REPL output. */
+export function openFileRefusedMessage(file: unknown): string {
+    return `Not opening "${neutralizeNotificationLinks(String(file))}": outside the workspace or not a .lpy/.py file`;
+}
+
+// The path comes from untrusted REPL output. Canonicalize it (symlinks, "..") before the
+// containment check, and open the canonical path rather than the original string so the
+// checked file is the opened file (short of a symlink swap racing the check).
+export function resolveOpenableFile(
+    file: string,
+    workspaceRoots: readonly string[],
+    allowedExtensions: readonly string[] = ['.lpy', '.py'],
+): string | undefined {
+    if (!path.isAbsolute(file)) { return undefined; }
+    let real: string;
+    try {
+        real = fs.realpathSync(file);
+        if (!fs.statSync(real).isFile()) { return undefined; }
+    } catch {
+        return undefined;
+    }
+    if (!allowedExtensions.includes(path.extname(real).toLowerCase())) { return undefined; }
+    for (const root of workspaceRoots) {
+        let realRoot: string;
+        try { realRoot = fs.realpathSync(root); } catch { continue; }
+        const rel = path.relative(realRoot, real);
+        if (rel === '' || rel === '..' || rel.startsWith('..' + path.sep) || path.isAbsolute(rel)) { continue; }
+        return real;
+    }
+    return undefined;
+}
+
 export function openFileWarning(file: unknown): string {
     return `Could not open file: "${neutralizeNotificationLinks(String(file))}"`;
 }
