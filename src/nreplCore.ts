@@ -510,12 +510,21 @@ export function startNreplServer(
     const port = new Promise<number>((resolve, reject) => {
         const timeout = setTimeout(
             () => reject(new Error('nREPL server did not start in time')), startTimeoutMs);
+        // Match complete lines only: a pipe read can end mid-banner, and a partial
+        // "started on 127.0.0.1:12" would resolve the wrong port. The real server
+        // prints a newline-terminated line, so an unterminated tail is never matched.
+        let pending = '';
         proc.stdout?.on('data', (text: string) => {
             handlers.onStdout(text);
-            const match = text.match(/started on .+:(\d+)/);
-            if (match) {
-                clearTimeout(timeout);
-                resolve(parseInt(match[1], 10));
+            const lines = (pending + text).split('\n');
+            pending = lines.pop() ?? '';
+            for (const line of lines) {
+                const match = line.match(/started on .+:(\d+)/);
+                if (match) {
+                    clearTimeout(timeout);
+                    resolve(parseInt(match[1], 10));
+                    return;
+                }
             }
         });
         proc.stderr?.on('data', (text: string) => handlers.onStderr(text));
