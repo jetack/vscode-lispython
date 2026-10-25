@@ -116,52 +116,116 @@ export function chooseNreplHome(
     return { activeFile: undefined, folder: undefined };
 }
 
-/**
- * Send one newline-delimited JSON request on `sock` and resolve with the first response
- * line. Rejects if the socket errors or closes first (e.g. the server died or the
- * connection was swapped), so a caller never waits forever; every listener is removed
- * once the request settles. This is the only reader of the socket, so it puts the socket
- * in utf8 mode once.
- */
-export function nreplRequestOn(sock: net.Socket, msg: Record<string, unknown>): Promise<any> {
-    return new Promise((resolve, reject) => {
-        if (sock.destroyed) {
-            reject(new Error('nREPL not connected'));
-            return;
-        }
+interface PendingRequest {
+    resolve: (value: any) => void;
+    reject: (err: unknown) => void;
+}
+
+// One reader per socket: every 'data' listener sees every chunk, so a socket has exactly
+// one reader, which routes each reply to its request. Replies are matched by `id` because the lpy
+// server echoes a truthy request id (hence ids start at 1). An id-less reply (the
+// parse-error reply, or a server predating id echo) goes to the oldest pending request
+// because the server answers one connection serially, in request order.
+class NreplReader {
+    private buf = '';
+    private nextId = 1;
+    // Insertion order is send order, so the first entry is the oldest pending request.
+    private readonly pending = new Map<number, PendingRequest>();
+
+    constructor(private readonly sock: net.Socket) {
         // One StringDecoder per socket, not per chunk: a multi-byte character split across
         // reads (or across requests) is carried over instead of decoding to U+FFFD.
         if (sock.readableEncoding !== 'utf8') sock.setEncoding('utf8');
-        let buf = '';
-        const cleanup = () => {
-            sock.removeListener('data', onData);
-            sock.removeListener('close', onClose);
-            sock.removeListener('error', onError);
-        };
-        const onData = (data: string) => {
-            buf += data;
-            const newlineIdx = buf.indexOf('\n');
-            if (newlineIdx < 0) return;
-            cleanup();
-            try {
-                resolve(JSON.parse(buf.slice(0, newlineIdx)));
-            } catch (e) {
-                reject(e);
-            }
-        };
-        const onClose = () => {
-            cleanup();
-            reject(new Error('nREPL connection closed'));
-        };
-        const onError = (err: Error) => {
-            cleanup();
-            reject(new Error(`nREPL connection error: ${err.message}`));
-        };
-        sock.on('data', onData);
-        sock.on('close', onClose);
-        sock.on('error', onError);
-        sock.write(JSON.stringify(msg) + '\n');
-    });
+        sock.on('data', this.onData);
+        sock.on('error', this.onError);
+        sock.on('close', this.onClose);
+    }
+
+    request(msg: Record<string, unknown>): Promise<any> {
+        return new Promise((resolve, reject) => {
+            const id = this.nextId++;
+            // Stringify before registering: a throw (BigInt, cycle) must not leave a dead
+            // entry that would later absorb an id-less reply.
+            const line = JSON.stringify({ ...msg, id }) + '\n';
+            this.pending.set(id, { resolve, reject });
+            this.sock.write(line);
+        });
+    }
+
+    private readonly onData = (data: string) => {
+        this.buf += data;
+        let newlineIdx: number;
+        while ((newlineIdx = this.buf.indexOf('\n')) >= 0) {
+            const line = this.buf.slice(0, newlineIdx);
+            this.buf = this.buf.slice(newlineIdx + 1);
+            this.handleLine(line);
+        }
+    };
+
+    private handleLine(line: string) {
+        let reply: any;
+        try {
+            reply = JSON.parse(line);
+        } catch (e) {
+            this.takeOldest()?.reject(e);
+            return;
+        }
+        const isObject = reply !== null && typeof reply === 'object' && !Array.isArray(reply);
+        if (isObject && reply.id !== undefined && reply.id !== null) {
+            const { id, ...payload } = reply;
+            const req = this.pending.get(id);
+            if (req === undefined) return; // unknown id: nobody is waiting for it
+            this.pending.delete(id);
+            req.resolve(payload);
+            return;
+        }
+        if (isObject) delete reply.id;
+        this.takeOldest()?.resolve(reply);
+    }
+
+    private takeOldest(): PendingRequest | undefined {
+        const first = this.pending.entries().next();
+        if (first.done) return undefined;
+        this.pending.delete(first.value[0]);
+        return first.value[1];
+    }
+
+    private rejectAll(err: Error) {
+        const reqs = [...this.pending.values()];
+        this.pending.clear();
+        for (const r of reqs) r.reject(err);
+    }
+
+    private readonly onError = (err: Error) => {
+        this.rejectAll(new Error(`nREPL connection error: ${err.message}`));
+    };
+
+    // A closed socket never reads again, so the reader detaches and is forgotten.
+    private readonly onClose = () => {
+        this.rejectAll(new Error('nREPL connection closed'));
+        this.sock.removeListener('data', this.onData);
+        this.sock.removeListener('error', this.onError);
+        this.sock.removeListener('close', this.onClose);
+        readers.delete(this.sock);
+    };
+}
+
+const readers = new WeakMap<net.Socket, NreplReader>();
+
+/**
+ * Send one newline-delimited JSON request on `sock` and resolve with its reply (the
+ * echoed `id` stripped). Requests may overlap: the socket's single reader routes each
+ * reply to its request. Rejects if the socket errors or closes first (e.g. the server
+ * died or the connection was swapped), so a caller never waits forever.
+ */
+export function nreplRequestOn(sock: net.Socket, msg: Record<string, unknown>): Promise<any> {
+    if (sock.destroyed) return Promise.reject(new Error('nREPL not connected'));
+    let reader = readers.get(sock);
+    if (reader === undefined) {
+        reader = new NreplReader(sock);
+        readers.set(sock, reader);
+    }
+    return reader.request(msg);
 }
 
 /** Rejection reason of a connect() superseded by a later connect() or by disconnect(). */
