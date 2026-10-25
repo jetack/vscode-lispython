@@ -11,7 +11,8 @@ import {
 } from 'vscode-languageclient/node';
 import {
     chooseNreplHome, completionKindName, findNreplPortFor, getReplHtml, makeNonce, NREPL_PORT_FILE,
-    NreplConnectCancelled, NreplConnection, nreplRequestOn, openFileWarning, resolveActiveFile,
+    NreplConnectCancelled, NreplConnection, nreplRequestOn, openFileRefusedMessage, openFileWarning, resolveActiveFile,
+    resolveOpenableFile,
     NreplServerSupervisor,
 } from './nreplCore';
 
@@ -608,8 +609,16 @@ function getOrCreateReplPanel(): vscode.WebviewPanel {
     nreplPanel.webview.html = getReplHtml(makeNonce(), nreplPanel.webview.cspSource);
     nreplPanel.webview.onDidReceiveMessage(async (msg) => {
         if (msg?.type === 'openFile' && typeof msg.file === 'string' && msg.file.length > 0 && Number.isInteger(msg.line) && msg.line > 0) {
+            const roots = (vscode.workspace.workspaceFolders ?? [])
+                .filter((f) => f.uri.scheme === 'file')
+                .map((f) => f.uri.fsPath);
+            const resolved = resolveOpenableFile(msg.file, roots);
+            if (!resolved) {
+                vscode.window.setStatusBarMessage(openFileRefusedMessage(msg.file), 5000);
+                return;
+            }
             try {
-                const uri = vscode.Uri.file(msg.file);
+                const uri = vscode.Uri.file(resolved);
                 const line = msg.line - 1;
                 const doc = await vscode.workspace.openTextDocument(uri);
                 const editor = await vscode.window.showTextDocument(doc, vscode.ViewColumn.One);

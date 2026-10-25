@@ -352,6 +352,63 @@ export function neutralizeNotificationLinks(text: string): string {
     return text.replace(/\]\(/g, ']\u200B(');
 }
 
+/**
+ * Status-bar text for a refused openFile. The status bar renders `$(codicon)` syntax, so
+ * `$(` is broken as well as notification links; the path is untrusted REPL output.
+ */
+export function openFileRefusedMessage(file: unknown): string {
+    const safe = neutralizeNotificationLinks(String(file)).replace(/\$\(/g, '$\u200B(');
+    return `Not opening "${safe}": not an existing .lpy/.py file inside the workspace`;
+}
+
+function isInside(root: string, p: string): boolean {
+    const rel = path.relative(root, p);
+    return rel !== '' && rel !== '..' && !rel.startsWith('..' + path.sep) && !path.isAbsolute(rel);
+}
+
+function isUncLike(p: string): boolean {
+    return p.startsWith('\\\\') || p.startsWith('//');
+}
+
+// The path comes from untrusted REPL output. A lexical pre-filter runs before any fs call so
+// a UNC path (SMB/NTLM connection) or a hung mount is never touched unless it already lies
+// under a root. Then canonicalize (symlinks, "..") before the real containment check, and
+// open the canonical path rather than the original string so the checked file is the opened
+// file (short of a symlink swap racing the check).
+export function resolveOpenableFile(
+    file: string,
+    workspaceRoots: readonly string[],
+    allowedExtensions: readonly string[] = ['.lpy', '.py'],
+): string | undefined {
+    if (!path.isAbsolute(file)) { return undefined; }
+    if (!allowedExtensions.includes(path.extname(file).toLowerCase())) { return undefined; }
+    const lexical = path.resolve(file);
+    // Roots are trusted, so realpath them freely: tracebacks often print the real path of a
+    // root that was opened through a symlink, so the pre-filter accepts either form.
+    const candidateRoots: string[] = [];
+    for (const root of workspaceRoots) {
+        if (isUncLike(file) && !isUncLike(root)) { continue; }
+        let realRoot: string;
+        try { realRoot = fs.realpathSync(root); } catch { continue; }
+        if (isInside(path.resolve(root), lexical) || isInside(realRoot, lexical)) {
+            candidateRoots.push(realRoot);
+        }
+    }
+    if (candidateRoots.length === 0) { return undefined; }
+    let real: string;
+    try {
+        real = fs.realpathSync(file);
+        if (!fs.statSync(real).isFile()) { return undefined; }
+    } catch {
+        return undefined;
+    }
+    if (!allowedExtensions.includes(path.extname(real).toLowerCase())) { return undefined; }
+    for (const realRoot of candidateRoots) {
+        if (isInside(realRoot, real)) { return real; }
+    }
+    return undefined;
+}
+
 /** Warning text for a file that could not be opened; the path is untrusted REPL output. */
 export function openFileWarning(file: unknown): string {
     return `Could not open file: "${neutralizeNotificationLinks(String(file))}"`;
