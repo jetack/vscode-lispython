@@ -7,3 +7,4 @@ out/**/*.map
 tsconfig.json
 **/*.ts
 **/.eslintrc*
+**/eslint.config.*
