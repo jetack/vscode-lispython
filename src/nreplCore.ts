@@ -357,7 +357,7 @@ export function neutralizeNotificationLinks(text: string): string {
  * `$(` is broken as well as notification links; the path is untrusted REPL output.
  */
 export function openFileRefusedMessage(file: unknown): string {
-    const safe = neutralizeNotificationLinks(String(file)).replace(/\$\(/g, '$​(');
+    const safe = neutralizeNotificationLinks(String(file)).replace(/\$\(/g, '$\u200B(');
     return `Not opening "${safe}": not an existing .lpy/.py file inside the workspace`;
 }
 
@@ -383,8 +383,17 @@ export function resolveOpenableFile(
     if (!path.isAbsolute(file)) { return undefined; }
     if (!allowedExtensions.includes(path.extname(file).toLowerCase())) { return undefined; }
     const lexical = path.resolve(file);
-    const candidateRoots = workspaceRoots.filter((root) =>
-        (!isUncLike(file) || isUncLike(root)) && isInside(path.resolve(root), lexical));
+    // Roots are trusted, so realpath them freely: tracebacks often print the real path of a
+    // root that was opened through a symlink, so the pre-filter accepts either form.
+    const candidateRoots: string[] = [];
+    for (const root of workspaceRoots) {
+        if (isUncLike(file) && !isUncLike(root)) { continue; }
+        let realRoot: string;
+        try { realRoot = fs.realpathSync(root); } catch { continue; }
+        if (isInside(path.resolve(root), lexical) || isInside(realRoot, lexical)) {
+            candidateRoots.push(realRoot);
+        }
+    }
     if (candidateRoots.length === 0) { return undefined; }
     let real: string;
     try {
@@ -394,9 +403,7 @@ export function resolveOpenableFile(
         return undefined;
     }
     if (!allowedExtensions.includes(path.extname(real).toLowerCase())) { return undefined; }
-    for (const root of candidateRoots) {
-        let realRoot: string;
-        try { realRoot = fs.realpathSync(root); } catch { continue; }
+    for (const realRoot of candidateRoots) {
         if (isInside(realRoot, real)) { return real; }
     }
     return undefined;

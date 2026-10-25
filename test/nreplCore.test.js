@@ -171,6 +171,8 @@ test('resolveOpenableFile admits files under a workspace root that is a symlink'
         const rootLink = path.join(fx.base, 'rootlink');
         fs.symlinkSync(fx.ws, rootLink);
         assert.strictEqual(core.resolveOpenableFile(path.join(rootLink, 'pkg', 'mod.lpy'), [rootLink]), fx.lpy);
+        // A traceback prints the real path of a root that was opened through the symlink.
+        assert.strictEqual(core.resolveOpenableFile(fx.lpy, [rootLink]), fx.lpy);
     } finally { fx.done(); }
 });
 
