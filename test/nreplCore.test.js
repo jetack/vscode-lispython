@@ -313,13 +313,75 @@ function clientTo(t, server) {
 
 const requestListeners = (sock) => ['data', 'close', 'error'].map((e) => sock.listenerCount(e));
 
-test('nreplRequestOn resolves with the first response line and removes its listeners', async (t) => {
+// Fake server: hands each batch of `n` parsed request lines to `reply`, whose return value
+// is written back in one write.
+function batchingServer(server, n, reply) {
+    server.on('connection', (s) => {
+        s.setEncoding('utf8');
+        let buf = '';
+        let batch = [];
+        s.on('data', (d) => {
+            buf += d;
+            let i;
+            while ((i = buf.indexOf('\n')) >= 0) {
+                batch.push(JSON.parse(buf.slice(0, i)));
+                buf = buf.slice(i + 1);
+                if (batch.length === n) {
+                    s.write(reply(batch));
+                    batch = [];
+                }
+            }
+        });
+    });
+}
+
+test('nreplRequestOn keeps one reader per socket across sequential requests', async (t) => {
     const a = await listen(t);
-    a.on('connection', (s) => s.on('data', () => s.write('{"value": "3"}\n{"value": "ignored"}\n')));
+    batchingServer(a, 1, ([req]) =>
+        JSON.stringify({ id: req.id, value: req.code }) + '\n{"value": "ignored"}\n');
     const sock = await clientTo(t, a);
     const before = requestListeners(sock);
-    assert.deepStrictEqual(await core.nreplRequestOn(sock, { op: 'eval', code: '(+ 1 2)' }), { value: '3' });
-    assert.deepStrictEqual(requestListeners(sock), before);
+    assert.deepStrictEqual(await core.nreplRequestOn(sock, { op: 'eval', code: 'a' }), { value: 'a' });
+    const afterFirst = requestListeners(sock);
+    assert.deepStrictEqual(afterFirst, before.map((c) => c + 1));
+    for (const code of ['b', 'c', 'd']) {
+        assert.deepStrictEqual(await core.nreplRequestOn(sock, { op: 'eval', code }), { value: code });
+    }
+    assert.deepStrictEqual(requestListeners(sock), afterFirst);
+});
+
+test('nreplRequestOn routes out-of-order replies on one socket by id', async (t) => {
+    const a = await listen(t);
+    batchingServer(a, 2, ([first, second]) =>
+        JSON.stringify({ id: second.id, value: second.code }) + '\n' +
+        JSON.stringify({ id: first.id, value: first.code }) + '\n');
+    const sock = await clientTo(t, a);
+    const evalReq = core.nreplRequestOn(sock, { op: 'eval', code: 'eval-result' });
+    const complete = core.nreplRequestOn(sock, { op: 'complete', code: 'complete-result' });
+    assert.deepStrictEqual(await Promise.all([evalReq, complete]),
+        [{ value: 'eval-result' }, { value: 'complete-result' }]);
+});
+
+test('nreplRequestOn settles id-less replies in send order', async (t) => {
+    const a = await listen(t);
+    batchingServer(a, 2, (reqs) => reqs.map((r) => JSON.stringify({ value: r.code }) + '\n').join(''));
+    const sock = await clientTo(t, a);
+    const one = core.nreplRequestOn(sock, { op: 'eval', code: 'one' });
+    const two = core.nreplRequestOn(sock, { op: 'eval', code: 'two' });
+    assert.deepStrictEqual(await Promise.all([one, two]), [{ value: 'one' }, { value: 'two' }]);
+});
+
+test('nreplRequestOn rejects every pending request when the socket closes', async (t) => {
+    const a = await listen(t);
+    let lines = 0;
+    a.on('connection', (s) => s.on('data', (d) => {
+        lines += d.toString().split('\n').length - 1;
+        if (lines >= 2) s.destroy();
+    }));
+    const sock = await clientTo(t, a);
+    const outcomes = await Promise.all(['1', '2'].map((code) =>
+        core.nreplRequestOn(sock, { op: 'eval', code }).then(() => 'resolved', (e) => e.message)));
+    assert.deepStrictEqual(outcomes, ['nREPL connection closed', 'nREPL connection closed']);
 });
 
 test('nreplRequestOn rejects when the server closes the socket mid-request', async (t) => {
