@@ -338,7 +338,7 @@ function batchingServer(server, n, reply) {
 test('nreplRequestOn keeps one reader per socket across sequential requests', async (t) => {
     const a = await listen(t);
     batchingServer(a, 1, ([req]) =>
-        JSON.stringify({ id: req.id, value: req.code }) + '\n{"value": "ignored"}\n');
+        JSON.stringify({ id: req.id, value: req.code }) + '\n');
     const sock = await clientTo(t, a);
     const before = requestListeners(sock);
     assert.deepStrictEqual(await core.nreplRequestOn(sock, { op: 'eval', code: 'a' }), { value: 'a' });

@@ -121,8 +121,8 @@ interface PendingRequest {
     reject: (err: unknown) => void;
 }
 
-// One reader per socket: per-request 'data' listeners each saw the first reply line, so
-// overlapping requests all settled with it. Replies are matched by `id` because the lpy
+// One reader per socket: every 'data' listener sees every chunk, so a socket has exactly
+// one reader, which routes each reply to its request. Replies are matched by `id` because the lpy
 // server echoes a truthy request id (hence ids start at 1). An id-less reply (the
 // parse-error reply, or a server predating id echo) goes to the oldest pending request
 // because the server answers one connection serially, in request order.
@@ -144,8 +144,11 @@ class NreplReader {
     request(msg: Record<string, unknown>): Promise<any> {
         return new Promise((resolve, reject) => {
             const id = this.nextId++;
+            // Stringify before registering: a throw (BigInt, cycle) must not leave a dead
+            // entry that would later absorb an id-less reply.
+            const line = JSON.stringify({ ...msg, id }) + '\n';
             this.pending.set(id, { resolve, reject });
-            this.sock.write(JSON.stringify({ ...msg, id }) + '\n');
+            this.sock.write(line);
         });
     }
 
