@@ -117,6 +117,7 @@ export function chooseNreplHome(
 }
 
 interface PendingRequest {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- untyped nREPL payload
     resolve: (value: any) => void;
     reject: (err: unknown) => void;
 }
@@ -141,6 +142,7 @@ class NreplReader {
         sock.on('close', this.onClose);
     }
 
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- untyped nREPL payload
     request(msg: Record<string, unknown>): Promise<any> {
         return new Promise((resolve, reject) => {
             const id = this.nextId++;
@@ -163,6 +165,7 @@ class NreplReader {
     };
 
     private handleLine(line: string) {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any -- untyped nREPL payload
         let reply: any;
         try {
             reply = JSON.parse(line);
@@ -218,6 +221,7 @@ const readers = new WeakMap<net.Socket, NreplReader>();
  * reply to its request. Rejects if the socket errors or closes first (e.g. the server
  * died or the connection was swapped), so a caller never waits forever.
  */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any -- untyped nREPL payload
 export function nreplRequestOn(sock: net.Socket, msg: Record<string, unknown>): Promise<any> {
     if (sock.destroyed) return Promise.reject(new Error('nREPL not connected'));
     let reader = readers.get(sock);
@@ -634,7 +638,7 @@ export class NreplServerSupervisor {
         }
         return new Promise((resolve) => {
             const force = setTimeout(() => {
-                try { proc.kill('SIGKILL'); } catch {}
+                try { proc.kill('SIGKILL'); } catch { /* process already exited */ }
                 resolve();
             }, 2000);
             proc.once('exit', () => {
