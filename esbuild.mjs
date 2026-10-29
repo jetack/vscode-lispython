@@ -13,8 +13,8 @@ const options = {
   platform: "node",
   format: "cjs",
   external: ["vscode"],
-  // VS Code 1.75 engine floor ships Electron 19 (Node 16.14).
-  target: "node16",
+  // VS Code 1.82 engine floor (the languageclient 9 floor) ships Electron 25 (Node 18).
+  target: "node18",
   minify: production,
   sourcemap: !production,
   logLevel: "info",
