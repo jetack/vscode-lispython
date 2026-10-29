@@ -120,17 +120,22 @@ interface PendingRequest {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any -- untyped nREPL payload
     resolve: (value: any) => void;
     reject: (err: unknown) => void;
+    timer: NodeJS.Timeout;
 }
 
+/** Default bound on one request. Generous because eval runs user code; a reply after it is dropped. */
+export const NREPL_REQUEST_TIMEOUT_MS = 60000;
+
 // One reader per socket: every 'data' listener sees every chunk, so a socket has exactly
-// one reader, which routes each reply to its request. Replies are matched by `id` because the lpy
-// server echoes a truthy request id (hence ids start at 1). An id-less reply (the
-// parse-error reply, or a server predating id echo) goes to the oldest pending request
-// because the server answers one connection serially, in request order.
+// one reader, which routes each reply to its request. Replies are matched by `id` only,
+// because the lpy server echoes a truthy request id (hence ids start at 1) and sends one
+// reply per request line. An id-less reply answers a line that never parsed, which is
+// none of our pending requests, so it settles nothing. A server that never replies (an
+// older one, for an unknown op) is bounded by the per-request timeout. An `op: "error"`
+// reply carrying a request's id rejects that request.
 class NreplReader {
     private buf = '';
     private nextId = 1;
-    // Insertion order is send order, so the first entry is the oldest pending request.
     private readonly pending = new Map<number, PendingRequest>();
 
     constructor(private readonly sock: net.Socket) {
@@ -143,13 +148,18 @@ class NreplReader {
     }
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any -- untyped nREPL payload
-    request(msg: Record<string, unknown>): Promise<any> {
+    request(msg: Record<string, unknown>, timeoutMs: number): Promise<any> {
         return new Promise((resolve, reject) => {
             const id = this.nextId++;
             // Stringify before registering: a throw (BigInt, cycle) must not leave a dead
-            // entry that would later absorb an id-less reply.
+            // entry that only the timeout would remove.
             const line = JSON.stringify({ ...msg, id }) + '\n';
-            this.pending.set(id, { resolve, reject });
+            const timer = setTimeout(() => {
+                this.pending.delete(id);
+                reject(new Error(`nREPL request timed out after ${timeoutMs} ms`));
+            }, timeoutMs);
+            timer.unref();
+            this.pending.set(id, { resolve, reject, timer });
             this.sock.write(line);
         });
     }
@@ -169,34 +179,30 @@ class NreplReader {
         let reply: any;
         try {
             reply = JSON.parse(line);
-        } catch (e) {
-            this.takeOldest()?.reject(e);
-            return;
+        } catch {
+            return; // not ours to settle: every request settles by its own id
         }
         const isObject = reply !== null && typeof reply === 'object' && !Array.isArray(reply);
-        if (isObject && reply.id !== undefined && reply.id !== null) {
-            const { id, ...payload } = reply;
-            const req = this.pending.get(id);
-            if (req === undefined) return; // unknown id: nobody is waiting for it
-            this.pending.delete(id);
+        if (!isObject || reply.id === undefined || reply.id === null) return;
+        const { id, ...payload } = reply;
+        const req = this.pending.get(id);
+        if (req === undefined) return; // unknown id: nobody is waiting for it
+        this.pending.delete(id);
+        clearTimeout(req.timer);
+        if (payload.op === 'error') {
+            req.reject(new Error(typeof payload.error === 'string' ? payload.error : 'nREPL error'));
+        } else {
             req.resolve(payload);
-            return;
         }
-        if (isObject) delete reply.id;
-        this.takeOldest()?.resolve(reply);
-    }
-
-    private takeOldest(): PendingRequest | undefined {
-        const first = this.pending.entries().next();
-        if (first.done) return undefined;
-        this.pending.delete(first.value[0]);
-        return first.value[1];
     }
 
     private rejectAll(err: Error) {
         const reqs = [...this.pending.values()];
         this.pending.clear();
-        for (const r of reqs) r.reject(err);
+        for (const r of reqs) {
+            clearTimeout(r.timer);
+            r.reject(err);
+        }
     }
 
     private readonly onError = (err: Error) => {
@@ -219,17 +225,23 @@ const readers = new WeakMap<net.Socket, NreplReader>();
  * Send one newline-delimited JSON request on `sock` and resolve with its reply (the
  * echoed `id` stripped). Requests may overlap: the socket's single reader routes each
  * reply to its request. Rejects if the socket errors or closes first (e.g. the server
- * died or the connection was swapped), so a caller never waits forever.
+ * died or the connection was swapped), when the server answers with an `op: "error"`
+ * reply for it, or after `timeoutMs` without a reply, so a caller never waits forever.
  */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any -- untyped nREPL payload
-export function nreplRequestOn(sock: net.Socket, msg: Record<string, unknown>): Promise<any> {
+export function nreplRequestOn(
+    sock: net.Socket,
+    msg: Record<string, unknown>,
+    timeoutMs = NREPL_REQUEST_TIMEOUT_MS,
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- untyped nREPL payload
+): Promise<any> {
     if (sock.destroyed) return Promise.reject(new Error('nREPL not connected'));
     let reader = readers.get(sock);
     if (reader === undefined) {
         reader = new NreplReader(sock);
         readers.set(sock, reader);
     }
-    return reader.request(msg);
+    return reader.request(msg, timeoutMs);
 }
 
 /** Rejection reason of a connect() superseded by a later connect() or by disconnect(). */
