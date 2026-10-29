@@ -2,9 +2,21 @@
 .vscode-test/**
 src/**
 test/**
-out/**/*.map
+# out/ is an allowlist so stale build output (old tsc files, maps) never ships.
+out/**
+!out/extension.js
 .gitignore
 tsconfig.json
 **/*.ts
 **/.eslintrc*
 **/eslint.config.*
+out-test/**
+node_modules/**
+esbuild.mjs
+bun.lock
+.claude/**
+.githooks/**
+.worktrees/**
+AGENTS.md
+CLAUDE.md
+GEMINI.md

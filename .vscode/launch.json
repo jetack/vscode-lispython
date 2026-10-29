@@ -3,11 +3,13 @@
   "configurations": [
     {
       "name": "Run Extension",
+      "preLaunchTask": "compile",
       "type": "extensionHost",
       "request": "launch",
       "args": [
         "--extensionDevelopmentPath=${workspaceFolder}"
-      ]
+      ],
+      "outFiles": ["${workspaceFolder}/out/**/*.js"]
     }
   ]
 }
