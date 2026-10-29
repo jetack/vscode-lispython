@@ -507,6 +507,50 @@ test('nreplRequestOn: a timeout removes only its own request and a late reply is
     assert.deepStrictEqual(await fast, { ok: { value: 'fast' } });
 });
 
+// Records every timer the code under test creates, and which are still live.
+function trackTimers(t) {
+    const live = new Set();
+    const set = global.setTimeout, clear = global.clearTimeout;
+    global.setTimeout = (fn, ms, ...a) => { const h = set(fn, ms, ...a); live.add(h); return h; };
+    global.clearTimeout = (h) => { live.delete(h); clear(h); };
+    t.after(() => { global.setTimeout = set; global.clearTimeout = clear; });
+    return live;
+}
+
+test('nreplRequestOn: eval and load-file arm no timeout, other ops get the tooling bound', async (t) => {
+    const live = trackTimers(t);
+    const sock = fakeSocket();
+    const evals = ['eval', 'load-file'].map((op) => core.nreplRequestOn(sock, { op }));
+    assert.strictEqual(live.size, 0);
+    const complete = core.nreplRequestOn(sock, { op: 'complete', prefix: 'x' });
+    assert.strictEqual(live.size, 1);
+    assert.strictEqual(core.nreplTimeoutFor({ op: 'eval' }), undefined);
+    assert.strictEqual(core.nreplTimeoutFor({ op: 'load-file' }), undefined);
+    assert.strictEqual(core.nreplTimeoutFor({ op: 'complete' }), core.NREPL_TOOLING_TIMEOUT_MS);
+    sock.reply({ id: sock.sent[2].id, completions: [] });
+    await complete;
+    sock.reply({ id: sock.sent[0].id, value: 'a' });
+    sock.reply({ id: sock.sent[1].id, value: 'b' });
+    assert.deepStrictEqual(await Promise.all(evals), [{ value: 'a' }, { value: 'b' }]);
+});
+
+test('nreplRequestOn: a settled request leaves no live timer', async (t) => {
+    const live = trackTimers(t);
+    const sock = fakeSocket();
+    const ok = core.nreplRequestOn(sock, { op: 'complete' }, 1000);
+    const err = outcome(core.nreplRequestOn(sock, { op: 'complete' }, 1000));
+    const closed = outcome(core.nreplRequestOn(sock, { op: 'complete' }, 1000));
+    assert.strictEqual(live.size, 3);
+    sock.reply({ id: sock.sent[0].id, value: 1 });
+    await ok;
+    sock.reply({ id: sock.sent[1].id, op: 'error', error: 'boom' });
+    await err;
+    assert.strictEqual(live.size, 1);
+    sock.emit('close');
+    await closed;
+    assert.strictEqual(live.size, 0);
+});
+
 test('nreplRequestOn ignores a malformed reply line', async () => {
     const sock = fakeSocket();
     const p = outcome(core.nreplRequestOn(sock, { op: 'eval', code: '1' }, 1000));

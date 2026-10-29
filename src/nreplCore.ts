@@ -120,11 +120,20 @@ interface PendingRequest {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any -- untyped nREPL payload
     resolve: (value: any) => void;
     reject: (err: unknown) => void;
-    timer: NodeJS.Timeout;
+    timer: NodeJS.Timeout | undefined;
 }
 
-/** Default bound on one request. Generous because eval runs user code; a reply after it is dropped. */
-export const NREPL_REQUEST_TIMEOUT_MS = 60000;
+/** Bound on a tooling request (complete, macroexpand, ...) so a stuck server cannot hang it. */
+export const NREPL_TOOLING_TIMEOUT_MS = 10000;
+
+// eval and load-file run user code for as long as it takes, so they settle only on a
+// reply or on socket close; a timeout would drop the real result when it arrives.
+const UNBOUNDED_OPS: ReadonlySet<unknown> = new Set(['eval', 'load-file']);
+
+/** The default timeout for a request: none (undefined) for user-code ops, else the tooling bound. */
+export function nreplTimeoutFor(msg: Record<string, unknown>): number | undefined {
+    return UNBOUNDED_OPS.has(msg.op) ? undefined : NREPL_TOOLING_TIMEOUT_MS;
+}
 
 // One reader per socket: every 'data' listener sees every chunk, so a socket has exactly
 // one reader, which routes each reply to its request. Replies are matched by `id` only,
@@ -148,17 +157,17 @@ class NreplReader {
     }
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any -- untyped nREPL payload
-    request(msg: Record<string, unknown>, timeoutMs: number): Promise<any> {
+    request(msg: Record<string, unknown>, timeoutMs: number | undefined): Promise<any> {
         return new Promise((resolve, reject) => {
             const id = this.nextId++;
             // Stringify before registering: a throw (BigInt, cycle) must not leave a dead
             // entry that only the timeout would remove.
             const line = JSON.stringify({ ...msg, id }) + '\n';
-            const timer = setTimeout(() => {
+            const timer = timeoutMs === undefined ? undefined : setTimeout(() => {
                 this.pending.delete(id);
                 reject(new Error(`nREPL request timed out after ${timeoutMs} ms`));
             }, timeoutMs);
-            timer.unref();
+            timer?.unref();
             this.pending.set(id, { resolve, reject, timer });
             this.sock.write(line);
         });
@@ -226,13 +235,13 @@ const readers = new WeakMap<net.Socket, NreplReader>();
  * echoed `id` stripped). Requests may overlap: the socket's single reader routes each
  * reply to its request. Rejects if the socket errors or closes first (e.g. the server
  * died or the connection was swapped), when the server answers with an `op: "error"`
- * reply for it, or after `timeoutMs` without a reply, so a caller never waits forever.
+ * reply for it, or after `timeoutMs` without a reply (by default only for non-eval ops, see nreplTimeoutFor), so a caller never waits forever.
  */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any -- untyped nREPL payload
 export function nreplRequestOn(
     sock: net.Socket,
     msg: Record<string, unknown>,
-    timeoutMs = NREPL_REQUEST_TIMEOUT_MS,
+    timeoutMs: number | undefined = nreplTimeoutFor(msg),
     // eslint-disable-next-line @typescript-eslint/no-explicit-any -- untyped nREPL payload
 ): Promise<any> {
     if (sock.destroyed) return Promise.reject(new Error('nREPL not connected'));
