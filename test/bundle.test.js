@@ -4,7 +4,9 @@ const fs = require('fs');
 const path = require('path');
 const Module = require('module');
 
-const bundlePath = process.env.LISPY_BUNDLE || path.join(__dirname, '../out/extension.js');
+const bundlePath = process.env.LISPY_BUNDLE
+    ? path.resolve(process.cwd(), process.env.LISPY_BUNDLE)
+    : path.join(__dirname, '../out/extension.js');
 
 // A Proxy that answers any property access or call with another harmless stub.
 function makeStub() {

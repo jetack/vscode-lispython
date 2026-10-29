@@ -2,6 +2,7 @@
 .vscode-test/**
 src/**
 test/**
+# out/ is an allowlist so stale build output (old tsc files, maps) never ships.
 out/**
 !out/extension.js
 .gitignore

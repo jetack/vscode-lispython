@@ -57,7 +57,7 @@ bun run test
 bun run package   # vsce package --no-dependencies
 ```
 
-Packaging uses `--no-dependencies` because the esbuild bundle inlines every runtime dependency.
+`bun run package` runs `vsce package --no-dependencies` (the bundle inlines every runtime dependency). vsce runs `vscode:prepublish` (`bun run build`) through `npm run`, so npm, which ships with Node, must be on PATH as a script launcher; vsce has no bun option.
 
 ## About LisPython
 

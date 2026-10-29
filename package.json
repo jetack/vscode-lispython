@@ -192,10 +192,11 @@
     "typecheck": "tsc -p ./ --noEmit",
     "compile": "tsc -p ./ && node esbuild.mjs",
     "watch": "node esbuild.mjs --watch",
-    "vscode:prepublish": "bun run typecheck && node esbuild.mjs --production",
+    "build": "bun run typecheck && node esbuild.mjs --production",
+    "vscode:prepublish": "bun run build",
     "package": "vsce package --no-dependencies",
     "lint": "eslint src",
-    "test": "tsc -p ./ && node esbuild.mjs --production && LISPY_EXPECT_PRODUCTION=1 node --test test/*.test.js"
+    "test": "tsc -p ./ && node esbuild.mjs --production --outfile=out-test/bundle/extension.js && LISPY_EXPECT_PRODUCTION=1 LISPY_BUNDLE=out-test/bundle/extension.js node --test test/*.test.js"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
