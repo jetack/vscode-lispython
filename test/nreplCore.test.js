@@ -975,6 +975,7 @@ function fakeDoc(text, fsPath, extra = {}) {
             const before = text.slice(0, offset).split('\n');
             return { line: before.length - 1, character: before[before.length - 1].length };
         },
+        lineAt: (line) => ({ text: text.split('\n')[line] ?? '' }),
         ...extra,
     };
 }
@@ -994,7 +995,15 @@ test('evalMessage: file/line/column are 1-based at the first character sent', ()
         { op: 'eval', code: '(c)', file: '/w/x.lpy', line: 3, column: 1 }, 'top-level form');
 });
 
-test('evalMessage: position past the server caps is dropped, file kept', () => {
+test('evalMessage: column counts code points, not UTF-16 units', () => {
+    const text = '(a "😀😀") (b)';
+    const start = text.indexOf('(b)');
+    assert.strictEqual(start, 11, 'two emoji are 4 UTF-16 units but 2 code points: column 10, not 12');
+    assert.deepStrictEqual(core.evalMessage('(b)', fakeDoc(text, '/w/e.lpy'), [start, start + 3]),
+        { op: 'eval', code: '(b)', file: '/w/e.lpy', line: 1, column: 10 });
+});
+
+test('evalMessage: position past the server caps is dropped with the file', () => {
     const lastCol = core.NREPL_MAX_EVAL_COLUMN;
     const wide = 'x'.repeat(lastCol + 5);
     const doc = fakeDoc(wide, '/w/min.lpy');
@@ -1002,7 +1011,7 @@ test('evalMessage: position past the server caps is dropped, file kept', () => {
     assert.deepStrictEqual(col(lastCol),
         { op: 'eval', code: 'x', file: '/w/min.lpy', line: 1, column: lastCol }, 'at the column cap');
     assert.deepStrictEqual(col(lastCol + 1),
-        { op: 'eval', code: 'x', file: '/w/min.lpy' }, 'past the column cap');
+        { op: 'eval', code: 'x' }, 'past the column cap');
 
     const lastLine = core.NREPL_MAX_EVAL_LINE;
     const tall = fakeDoc('', '/w/tall.lpy', { positionAt: (o) => ({ line: o, character: 0 }) });
@@ -1010,7 +1019,7 @@ test('evalMessage: position past the server caps is dropped, file kept', () => {
     assert.deepStrictEqual(line(lastLine),
         { op: 'eval', code: 'x', file: '/w/tall.lpy', line: lastLine, column: 1 }, 'at the line cap');
     assert.deepStrictEqual(line(lastLine + 1),
-        { op: 'eval', code: 'x', file: '/w/tall.lpy' }, 'past the line cap');
+        { op: 'eval', code: 'x' }, 'past the line cap');
 });
 
 test('evalMessage: untitled and non-file documents send no file or position', () => {

@@ -285,8 +285,9 @@ export const NREPL_MAX_EVAL_COLUMN = 100_000;
  * `file`, `line` and `column` (1-based, the position of the code's first character, `range[0]`)
  * let the server report errors at the editor position instead of `<nrepl-N>`.
  * An untitled or non-file document has no real path, so it sends neither file nor position and the
- * server names it `<nrepl-N>`. A position past the server's caps is dropped (file only) so the
- * eval still runs.
+ * server names it `<nrepl-N>`. A position past the server's caps is dropped together with the file
+ * (a file without a position would overlay the code onto lines 1..n of the real file) so the eval
+ * still runs. The column counts code points like the server's Python, not UTF-16 units.
  */
 export function evalMessage(
     code: string,
@@ -294,16 +295,15 @@ export function evalMessage(
         uri: { fsPath: string; scheme: string };
         isUntitled: boolean;
         positionAt(offset: number): { line: number; character: number };
+        lineAt(line: number): { text: string };
     },
     range: [number, number],
 ): Record<string, unknown> {
     if (doc.isUntitled || doc.uri.scheme !== 'file') return { op: 'eval', code };
     const start = doc.positionAt(range[0]);
     const line = start.line + 1;
-    const column = start.character + 1;
-    if (line > NREPL_MAX_EVAL_LINE || column > NREPL_MAX_EVAL_COLUMN) {
-        return { op: 'eval', code, file: doc.uri.fsPath };
-    }
+    const column = [...doc.lineAt(start.line).text.slice(0, start.character)].length + 1;
+    if (line > NREPL_MAX_EVAL_LINE || column > NREPL_MAX_EVAL_COLUMN) return { op: 'eval', code };
     return { op: 'eval', code, file: doc.uri.fsPath, line, column };
 }
 
