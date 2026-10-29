@@ -696,6 +696,9 @@ async function connectNrepl(port: number): Promise<void> {
         if (echoes || nreplConn.socket !== sock) return;
         getNreplOutputChannel().appendLine(NREPL_NO_ID_ECHO_MESSAGE);
         vscode.window.showErrorMessage(NREPL_NO_ID_ECHO_MESSAGE);
+        // Its replies can never be matched, so drop the connection: pending and later requests
+        // fail at once instead of waiting out their timeouts.
+        nreplConn.disconnect();
     });
 }
 

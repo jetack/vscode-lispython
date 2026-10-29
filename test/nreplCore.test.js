@@ -635,6 +635,13 @@ test('nreplRequestOn: an error reply to eval or load-file resolves so it shows a
     assert.deepStrictEqual(await load, { ok: { op: 'error', error: 'no such file' } });
 });
 
+test('nreplRequestOn: an eval error reply without error text gets the fallback text', async () => {
+    const sock = fakeSocket();
+    const p = outcome(core.nreplRequestOn(sock, { op: 'eval', code: '(' }));
+    sock.reply({ id: sock.sent[0].id, op: 'error' });
+    assert.deepStrictEqual(await p, { ok: { op: 'error', error: 'nREPL error' } });
+});
+
 test('serverEchoesIds: true when the probe reply carries its id', async () => {
     const sock = fakeSocket();
     const p = core.serverEchoesIds(sock, 1000);

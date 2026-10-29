@@ -213,7 +213,9 @@ class NreplReader {
         if (payload.op === 'error' && !req.errorIsResult) {
             req.reject(new Error(typeof payload.error === 'string' ? payload.error : 'nREPL error'));
         } else {
-            req.resolve(payload);
+            req.resolve(payload.op === 'error' && typeof payload.error !== 'string'
+                ? { ...payload, error: 'nREPL error' }
+                : payload);
         }
     }
 
@@ -247,7 +249,7 @@ const readers = new WeakMap<net.Socket, NreplReader>();
  * echoed `id` stripped). Requests may overlap: the socket's single reader routes each
  * reply to its request. Rejects if the socket errors or closes first (e.g. the server
  * died or the connection was swapped), when the server answers with an `op: "error"`
- * reply for it, or after `timeoutMs` without a reply. The default timeout
+ * reply for it (eval and load-file resolve with it instead), or after `timeoutMs` without a reply. The default timeout
  * (nreplTimeoutFor) applies to tooling ops only; eval and load-file wait for their reply.
  */
 export function nreplRequestOn(
