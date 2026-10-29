@@ -625,6 +625,45 @@ test('nreplRequestOn keeps a multi-byte character split across reads', async (t)
     assert.strictEqual(chunks, 2, 'the response must really arrive in two reads');
 });
 
+test('nreplRequestOn: an error reply to eval or load-file resolves so it shows as output', async () => {
+    const sock = fakeSocket();
+    const evalReq = outcome(core.nreplRequestOn(sock, { op: 'eval', code: '(' }));
+    const load = outcome(core.nreplRequestOn(sock, { op: 'load-file', path: 'x.lpy' }));
+    sock.reply({ id: sock.sent[0].id, op: 'error', error: 'SyntaxError' });
+    sock.reply({ id: sock.sent[1].id, op: 'error', error: 'no such file' });
+    assert.deepStrictEqual(await evalReq, { ok: { op: 'error', error: 'SyntaxError' } });
+    assert.deepStrictEqual(await load, { ok: { op: 'error', error: 'no such file' } });
+});
+
+test('serverEchoesIds: true when the probe reply carries its id', async () => {
+    const sock = fakeSocket();
+    const p = core.serverEchoesIds(sock, 1000);
+    assert.deepStrictEqual(sock.sent.map((m) => m.op), ['complete']);
+    sock.reply({ id: sock.sent[0].id, completions: [] });
+    assert.strictEqual(await p, true);
+});
+
+test('serverEchoesIds: an error reply that carries the id still counts as echoing', async () => {
+    const sock = fakeSocket();
+    const p = core.serverEchoesIds(sock, 1000);
+    sock.reply({ id: sock.sent[0].id, op: 'error', error: 'unknown op' });
+    assert.strictEqual(await p, true);
+});
+
+test('serverEchoesIds: false when the reply has no id (older server)', async () => {
+    const sock = fakeSocket();
+    const p = core.serverEchoesIds(sock, 30);
+    sock.reply({ completions: [] });
+    assert.strictEqual(await p, false);
+});
+
+test('serverEchoesIds: a socket that closes says nothing against the server', async () => {
+    const sock = fakeSocket();
+    const p = core.serverEchoesIds(sock, 1000);
+    sock.emit('close');
+    assert.strictEqual(await p, true);
+});
+
 test('startNreplServer rejects at once when the binary cannot be spawned', async () => {
     const bin = 'lpy-does-not-exist-xyz';
     const t0 = Date.now();

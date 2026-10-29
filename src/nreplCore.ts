@@ -121,6 +121,8 @@ interface PendingRequest {
     resolve: (value: any) => void;
     reject: (err: unknown) => void;
     timer: NodeJS.Timeout | undefined;
+    /** An `op: "error"` reply resolves instead of rejecting: it is the result of user code. */
+    errorIsResult: boolean;
 }
 
 /** Bound on a tooling request (complete, macroexpand, ...) so a stuck server cannot hang it. */
@@ -128,11 +130,11 @@ export const NREPL_TOOLING_TIMEOUT_MS = 10000;
 
 // eval and load-file run user code for as long as it takes, so they settle only on a
 // reply or on socket close; a timeout would drop the real result when it arrives.
-const UNBOUNDED_OPS: ReadonlySet<unknown> = new Set(['eval', 'load-file']);
+const USER_CODE_OPS: ReadonlySet<unknown> = new Set(['eval', 'load-file']);
 
 /** The default timeout for a request: none (undefined) for user-code ops, else the tooling bound. */
 export function nreplTimeoutFor(msg: Record<string, unknown>): number | undefined {
-    return UNBOUNDED_OPS.has(msg.op) ? undefined : NREPL_TOOLING_TIMEOUT_MS;
+    return USER_CODE_OPS.has(msg.op) ? undefined : NREPL_TOOLING_TIMEOUT_MS;
 }
 
 // One reader per socket: every 'data' listener sees every chunk, so a socket has exactly
@@ -141,7 +143,17 @@ export function nreplTimeoutFor(msg: Record<string, unknown>): number | undefine
 // reply per request line. An id-less reply answers a line that never parsed, which is
 // none of our pending requests, so it settles nothing. A server that never replies (an
 // older one, for an unknown op) is bounded by the per-request timeout. An `op: "error"`
-// reply carrying a request's id rejects that request.
+// reply carrying a request's id rejects that request, except for eval and load-file, where it
+// resolves like any other reply so the caller shows its `error` as eval output.
+
+/** Rejection reason of a request that got no reply within its timeout. */
+export class NreplRequestTimeout extends Error {
+    constructor(timeoutMs: number) {
+        super(`nREPL request timed out after ${timeoutMs} ms`);
+        this.name = 'NreplRequestTimeout';
+    }
+}
+
 class NreplReader {
     private buf = '';
     private nextId = 1;
@@ -166,10 +178,10 @@ class NreplReader {
             this.sock.write(line);
             const timer = timeoutMs === undefined ? undefined : setTimeout(() => {
                 this.pending.delete(id);
-                reject(new Error(`nREPL request timed out after ${timeoutMs} ms`));
+                reject(new NreplRequestTimeout(timeoutMs));
             }, timeoutMs);
             timer?.unref();
-            this.pending.set(id, { resolve, reject, timer });
+            this.pending.set(id, { resolve, reject, timer, errorIsResult: USER_CODE_OPS.has(msg.op) });
         });
     }
 
@@ -198,7 +210,7 @@ class NreplReader {
         if (req === undefined) return; // unknown id: nobody is waiting for it
         this.pending.delete(id);
         clearTimeout(req.timer);
-        if (payload.op === 'error') {
+        if (payload.op === 'error' && !req.errorIsResult) {
             req.reject(new Error(typeof payload.error === 'string' ? payload.error : 'nREPL error'));
         } else {
             req.resolve(payload);
@@ -251,6 +263,28 @@ export function nreplRequestOn(
         readers.set(sock, reader);
     }
     return reader.request(msg, timeoutMs);
+}
+
+export const NREPL_ID_ECHO_TIMEOUT_MS = 3000;
+
+export const NREPL_NO_ID_ECHO_MESSAGE =
+    'The nREPL server does not echo request ids: it is too old. Upgrade lispython.';
+
+/**
+ * Probe a fresh connection with one cheap request. A server that does not echo request ids
+ * never settles it, so a timeout means "too old"; any other failure (socket closed, an error
+ * reply that does carry the id) says nothing against the server and counts as echoing.
+ */
+export async function serverEchoesIds(
+    sock: net.Socket,
+    timeoutMs = NREPL_ID_ECHO_TIMEOUT_MS,
+): Promise<boolean> {
+    try {
+        await nreplRequestOn(sock, { op: 'complete', prefix: '' }, timeoutMs);
+    } catch (err) {
+        return !(err instanceof NreplRequestTimeout);
+    }
+    return true;
 }
 
 /** Rejection reason of a connect() superseded by a later connect() or by disconnect(). */

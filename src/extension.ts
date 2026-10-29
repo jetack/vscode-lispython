@@ -11,7 +11,7 @@ import {
 } from 'vscode-languageclient/node';
 import {
     chooseNreplHome, completionKindName, findNreplPortFor, getReplHtml, makeNonce, NREPL_PORT_FILE,
-    NreplConnectCancelled, NreplConnection, nreplRequestOn, openFileRefusedMessage, openFileWarning, resolveActiveFile,
+    NREPL_NO_ID_ECHO_MESSAGE, NreplConnectCancelled, NreplConnection, nreplRequestOn, openFileRefusedMessage, openFileWarning, resolveActiveFile, serverEchoesIds,
     resolveOpenableFile,
     NreplServerSupervisor,
 } from './nreplCore';
@@ -683,6 +683,22 @@ function nreplHome(): { activeFile: string | undefined; folder: string | undefin
     return chooseNreplHome(activeFile, owner, folders);
 }
 
+/**
+ * Connect, then probe the server once for request-id echo. The probe runs after connect()
+ * resolves and is not awaited, so a slow or old server never delays or fails the connect.
+ */
+async function connectNrepl(port: number): Promise<void> {
+    await nreplConn.connect(port);
+    const sock = nreplConn.socket;
+    if (!sock) return;
+    void serverEchoesIds(sock).then((echoes) => {
+        // A swapped or closed socket says nothing about the server now connected.
+        if (echoes || nreplConn.socket !== sock) return;
+        getNreplOutputChannel().appendLine(NREPL_NO_ID_ECHO_MESSAGE);
+        vscode.window.showErrorMessage(NREPL_NO_ID_ECHO_MESSAGE);
+    });
+}
+
 function disconnectNrepl(): Promise<void> {
     nreplConn.disconnect();
     return nreplServer.stop();
@@ -713,7 +729,7 @@ async function startNrepl(): Promise<void> {
             // Status is nreplConn's alone: the server dying closes its socket, which reports it.
             onExit: (code) => out.appendLine(`nREPL server exited (code ${code})`),
             connect: async (port) => {
-                await nreplConn.connect(port);
+                await connectNrepl(port);
                 out.appendLine(`Connected to nREPL on port ${port}`);
             },
         });
@@ -743,7 +759,7 @@ async function connectNreplFromPortFile(): Promise<void> {
     // Not disconnectNrepl(): that would kill a server this extension spawned, which wrote this very file.
     // nreplConn swaps sockets only once the new one connects, so a stale port leaves a live session intact.
     try {
-        await nreplConn.connect(found.port);
+        await connectNrepl(found.port);
         getNreplOutputChannel().appendLine(`Connected to nREPL on port ${found.port} (from ${found.file})`);
     } catch (err) {
         if (err instanceof NreplConnectCancelled) return;
