@@ -689,8 +689,11 @@ test('probeIdEcho: an id-less reply settles only the probe, not other requests',
     assert.deepStrictEqual(await other, { err: 'nREPL request timed out after 50 ms' });
 });
 
+// Like NreplConnection, the socket's close clears it as current.
 function fakeConn(sock) {
-    return { socket: sock, disconnects: 0, disconnect() { this.disconnects++; this.socket = undefined; } };
+    const conn = { socket: sock, destroys: 0 };
+    sock.destroy = () => { conn.destroys++; sock.destroyed = true; sock.emit('close'); if (conn.socket === sock) conn.socket = undefined; };
+    return conn;
 }
 
 function notes() {
@@ -709,7 +712,7 @@ test('checkServerIdEcho: an id-less reply shows the too-old message once and dis
     assert.strictEqual(await p, 'missing');
     assert.deepStrictEqual(n.toasts, [core.NREPL_NO_ID_ECHO_MESSAGE]);
     assert.deepStrictEqual(n.logs, [core.NREPL_NO_ID_ECHO_MESSAGE]);
-    assert.strictEqual(conn.disconnects, 1);
+    assert.strictEqual(conn.destroys, 1);
 });
 
 test('checkServerIdEcho: no reply keeps the connection, logs, and shows no toast', async () => {
@@ -719,7 +722,7 @@ test('checkServerIdEcho: no reply keeps the connection, logs, and shows no toast
     assert.strictEqual(await core.checkServerIdEcho(conn, sock, n, 30), 'inconclusive');
     assert.deepStrictEqual(n.toasts, []);
     assert.deepStrictEqual(n.logs, [core.NREPL_ID_ECHO_INCONCLUSIVE_MESSAGE]);
-    assert.strictEqual(conn.disconnects, 0);
+    assert.strictEqual(conn.destroys, 0);
     assert.strictEqual(conn.socket, sock);
 });
 
@@ -730,17 +733,18 @@ test('checkServerIdEcho: an echoing server is left alone and silent', async () =
     const p = core.checkServerIdEcho(conn, sock, n, 1000);
     sock.reply({ id: sock.sent[0].id, completions: [] });
     assert.strictEqual(await p, 'echoed');
-    assert.deepStrictEqual([n.logs, n.toasts, conn.disconnects], [[], [], 0]);
+    assert.deepStrictEqual([n.logs, n.toasts, conn.destroys], [[], [], 0]);
 });
 
 test('checkServerIdEcho: a verdict for a swapped-out socket changes nothing', async () => {
     const sock = fakeSocket();
-    const conn = fakeConn(fakeSocket());
+    const other = fakeSocket();
+    const conn = fakeConn(other);
     const n = notes();
     const p = core.checkServerIdEcho(conn, sock, n, 5000);
     sock.reply({ completions: [] });
     assert.strictEqual(await p, 'missing');
-    assert.deepStrictEqual([n.logs, n.toasts, conn.disconnects], [[], [], 0]);
+    assert.deepStrictEqual([n.logs, n.toasts, conn.destroys], [[], [], 0]);
 });
 
 test('startNreplServer rejects at once when the binary cannot be spawned', async () => {

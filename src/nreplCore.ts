@@ -331,12 +331,12 @@ export const NREPL_ID_ECHO_INCONCLUSIVE_MESSAGE =
 
 /**
  * Probe `sock` and act on the verdict. 'missing' reports the server as too old and drops the
- * connection, whose replies can never be matched, so pending and later requests fail at once.
+ * probed socket, whose replies can never be matched, so pending and later requests fail at once.
  * 'inconclusive' only logs: a busy server is not an old one. A verdict for a socket that is no
  * longer `conn`'s current one says nothing about the server now connected.
  */
 export async function checkServerIdEcho(
-    conn: { readonly socket: net.Socket | undefined; disconnect(): void },
+    conn: { readonly socket: net.Socket | undefined },
     sock: net.Socket,
     notify: { log(text: string): void; tooOld(text: string): void },
     timeoutMs?: number,
@@ -346,7 +346,9 @@ export async function checkServerIdEcho(
     if (verdict === 'missing') {
         notify.log(NREPL_NO_ID_ECHO_MESSAGE);
         notify.tooOld(NREPL_NO_ID_ECHO_MESSAGE);
-        conn.disconnect();
+        // Not conn.disconnect(): that would also cancel a newer connect still in flight. The
+        // socket's own close clears it as current and reports the status.
+        sock.destroy();
     } else if (verdict === 'inconclusive') {
         notify.log(NREPL_ID_ECHO_INCONCLUSIVE_MESSAGE);
     }
