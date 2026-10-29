@@ -160,16 +160,16 @@ class NreplReader {
     request(msg: Record<string, unknown>, timeoutMs: number | undefined): Promise<any> {
         return new Promise((resolve, reject) => {
             const id = this.nextId++;
-            // Stringify before registering: a throw (BigInt, cycle) must not leave a dead
-            // entry that only the timeout would remove.
+            // Stringify and write before registering: a throw (BigInt, cycle, write) must not
+            // leave a pending entry or a live timer behind.
             const line = JSON.stringify({ ...msg, id }) + '\n';
+            this.sock.write(line);
             const timer = timeoutMs === undefined ? undefined : setTimeout(() => {
                 this.pending.delete(id);
                 reject(new Error(`nREPL request timed out after ${timeoutMs} ms`));
             }, timeoutMs);
             timer?.unref();
             this.pending.set(id, { resolve, reject, timer });
-            this.sock.write(line);
         });
     }
 
