@@ -276,18 +276,35 @@ class NreplReader {
 
 const readers = new WeakMap<net.Socket, NreplReader>();
 
+// Other side of the contract: lispython src/lispy/tools.lpy (nrepl-eval) raises ValueError past these.
+export const NREPL_MAX_EVAL_LINE = 1_000_000;
+export const NREPL_MAX_EVAL_COLUMN = 100_000;
+
 /**
- * The nREPL `eval` request for `code`, which starts at `startOffset` in `doc`. `file`, `line` and
- * `column` (1-based, the position of the code's first character) let the server report errors at
- * the editor position instead of `<nrepl-N>`; `startOffset` must be the first character actually sent.
+ * The nREPL `eval` request for the text of `doc` at `range` (`code` is exactly that text).
+ * `file`, `line` and `column` (1-based, the position of the code's first character, `range[0]`)
+ * let the server report errors at the editor position instead of `<nrepl-N>`.
+ * An untitled or non-file document has no real path, so it sends neither file nor position and the
+ * server names it `<nrepl-N>`. A position past the server's caps is dropped (file only) so the
+ * eval still runs.
  */
 export function evalMessage(
     code: string,
-    doc: { uri: { fsPath: string }; positionAt(offset: number): { line: number; character: number } },
-    startOffset: number,
+    doc: {
+        uri: { fsPath: string; scheme: string };
+        isUntitled: boolean;
+        positionAt(offset: number): { line: number; character: number };
+    },
+    range: [number, number],
 ): Record<string, unknown> {
-    const start = doc.positionAt(startOffset);
-    return { op: 'eval', code, file: doc.uri.fsPath, line: start.line + 1, column: start.character + 1 };
+    if (doc.isUntitled || doc.uri.scheme !== 'file') return { op: 'eval', code };
+    const start = doc.positionAt(range[0]);
+    const line = start.line + 1;
+    const column = start.character + 1;
+    if (line > NREPL_MAX_EVAL_LINE || column > NREPL_MAX_EVAL_COLUMN) {
+        return { op: 'eval', code, file: doc.uri.fsPath };
+    }
+    return { op: 'eval', code, file: doc.uri.fsPath, line, column };
 }
 
 /**

@@ -766,8 +766,8 @@ async function connectNreplFromPortFile(): Promise<void> {
     }
 }
 
-function nreplEval(code: string, doc: vscode.TextDocument, startOffset: number): Promise<{ value?: string; stdout?: string; error?: string }> {
-    return nreplRequest(evalMessage(code, doc, startOffset));
+function nreplEval(code: string, doc: vscode.TextDocument, range: [number, number]): Promise<{ value?: string; stdout?: string; error?: string }> {
+    return nreplRequest(evalMessage(code, doc, range));
 }
 
 /** Send an arbitrary JSON request to the nREPL and return the parsed response. */
@@ -780,7 +780,7 @@ function nreplRequest(msg: Record<string, unknown>): Promise<any> {
 
 async function evalAndShow(code: string, editor: vscode.TextEditor, range: [number, number]): Promise<void> {
     try {
-        const result = await nreplEval(code, editor.document, range[0]);
+        const result = await nreplEval(code, editor.document, range);
         appendToReplPanel(code, result);
 
         // Also show inline decoration briefly
