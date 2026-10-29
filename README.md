@@ -48,6 +48,17 @@ The LSP server will restart with the selected interpreter.
 |---|---|---|
 | `lispython.lsp.pythonPath` | `python3` | Path to the Python interpreter that has lispython installed |
 
+## Development
+
+```
+bun install
+bun run compile   # type check + esbuild bundle into out/
+bun run test
+bun run package   # vsce package --no-dependencies
+```
+
+Packaging uses `--no-dependencies` because the esbuild bundle inlines every runtime dependency.
+
 ## About LisPython
 
 LisPython is a Lisp-like syntax layer for Python — 100% compatible with Python libraries, with Clojure-inspired macros (`defmacro`, quasiquote, unquote, splice).

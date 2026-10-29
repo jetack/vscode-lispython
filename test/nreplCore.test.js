@@ -4,7 +4,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const net = require('net');
-const core = require('../out/nreplCore');
+const core = require('../out-test/nreplCore');
 
 test('kind mapping', () => {
     const kinds = { A: 'class', f: 'function', v: 'variable', m: 'macro', k: 'keyword', x: 'weird' };
