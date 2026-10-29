@@ -459,13 +459,104 @@ test('nreplRequestOn routes out-of-order replies on one socket by id', async (t)
         [{ value: 'eval-result' }, { value: 'complete-result' }]);
 });
 
-test('nreplRequestOn settles id-less replies in send order', async (t) => {
-    const a = await listen(t);
-    batchingServer(a, 2, (reqs) => reqs.map((r) => JSON.stringify({ value: r.code }) + '\n').join(''));
-    const sock = await clientTo(t, a);
-    const one = core.nreplRequestOn(sock, { op: 'eval', code: 'one' });
-    const two = core.nreplRequestOn(sock, { op: 'eval', code: 'two' });
-    assert.deepStrictEqual(await Promise.all([one, two]), [{ value: 'one' }, { value: 'two' }]);
+// In-memory socket: `sent` collects request lines, `reply(obj|string)` feeds a reply line.
+function fakeSocket() {
+    const sock = new (require('events').EventEmitter)();
+    sock.destroyed = false;
+    sock.readableEncoding = 'utf8';
+    sock.setEncoding = () => {};
+    sock.sent = [];
+    sock.write = (line) => { sock.sent.push(JSON.parse(line)); };
+    sock.reply = (r) => sock.emit('data', (typeof r === 'string' ? r : JSON.stringify(r)) + '\n');
+    return sock;
+}
+
+const outcome = (p) => p.then((v) => ({ ok: v }), (e) => ({ err: e.message }));
+
+test('nreplRequestOn: an id-less reply settles no pending request', async () => {
+    const sock = fakeSocket();
+    const p = outcome(core.nreplRequestOn(sock, { op: 'bogus' }, 50));
+    sock.reply({ op: 'error', error: 'bad json' });
+    assert.deepStrictEqual(await p, { err: 'nREPL request timed out after 50 ms' });
+});
+
+test('nreplRequestOn: unknown op then an id-less reply does not settle the next request', async () => {
+    const sock = fakeSocket();
+    const unknown = outcome(core.nreplRequestOn(sock, { op: 'bogus' }, 50));
+    sock.reply({ op: 'error', error: 'bad json' }); // id-less: belongs to neither
+    const next = outcome(core.nreplRequestOn(sock, { op: 'eval', code: '1' }, 1000));
+    sock.reply({ id: sock.sent[1].id, value: '1' });
+    assert.deepStrictEqual(await next, { ok: { value: '1' } });
+    assert.deepStrictEqual(await unknown, { err: 'nREPL request timed out after 50 ms' });
+});
+
+test('nreplRequestOn rejects on an error reply carrying its id', async () => {
+    const sock = fakeSocket();
+    const p = outcome(core.nreplRequestOn(sock, { op: 'bogus' }, 1000));
+    sock.reply({ id: sock.sent[0].id, op: 'error', error: 'unknown op: bogus' });
+    assert.deepStrictEqual(await p, { err: 'unknown op: bogus' });
+});
+
+test('nreplRequestOn: a timeout removes only its own request and a late reply is ignored', async () => {
+    const sock = fakeSocket();
+    const slow = outcome(core.nreplRequestOn(sock, { op: 'eval', code: 'slow' }, 30));
+    const fast = outcome(core.nreplRequestOn(sock, { op: 'eval', code: 'fast' }, 1000));
+    assert.deepStrictEqual(await slow, { err: 'nREPL request timed out after 30 ms' });
+    sock.reply({ id: sock.sent[0].id, value: 'late' });
+    sock.reply({ id: sock.sent[1].id, value: 'fast' });
+    assert.deepStrictEqual(await fast, { ok: { value: 'fast' } });
+});
+
+// Records every timer the code under test creates, and which are still live.
+function trackTimers(t) {
+    const live = new Set();
+    const set = global.setTimeout, clear = global.clearTimeout;
+    global.setTimeout = (fn, ms, ...a) => { const h = set(fn, ms, ...a); live.add(h); return h; };
+    global.clearTimeout = (h) => { live.delete(h); clear(h); };
+    t.after(() => { global.setTimeout = set; global.clearTimeout = clear; });
+    return live;
+}
+
+test('nreplRequestOn: eval and load-file arm no timeout, other ops get the tooling bound', async (t) => {
+    const live = trackTimers(t);
+    const sock = fakeSocket();
+    const evals = ['eval', 'load-file'].map((op) => core.nreplRequestOn(sock, { op }));
+    assert.strictEqual(live.size, 0);
+    const complete = core.nreplRequestOn(sock, { op: 'complete', prefix: 'x' });
+    assert.strictEqual(live.size, 1);
+    assert.strictEqual(core.nreplTimeoutFor({ op: 'eval' }), undefined);
+    assert.strictEqual(core.nreplTimeoutFor({ op: 'load-file' }), undefined);
+    assert.strictEqual(core.nreplTimeoutFor({ op: 'complete' }), core.NREPL_TOOLING_TIMEOUT_MS);
+    sock.reply({ id: sock.sent[2].id, completions: [] });
+    await complete;
+    sock.reply({ id: sock.sent[0].id, value: 'a' });
+    sock.reply({ id: sock.sent[1].id, value: 'b' });
+    assert.deepStrictEqual(await Promise.all(evals), [{ value: 'a' }, { value: 'b' }]);
+});
+
+test('nreplRequestOn: a settled request leaves no live timer', async (t) => {
+    const live = trackTimers(t);
+    const sock = fakeSocket();
+    const ok = core.nreplRequestOn(sock, { op: 'complete' }, 1000);
+    const err = outcome(core.nreplRequestOn(sock, { op: 'complete' }, 1000));
+    const closed = outcome(core.nreplRequestOn(sock, { op: 'complete' }, 1000));
+    assert.strictEqual(live.size, 3);
+    sock.reply({ id: sock.sent[0].id, value: 1 });
+    await ok;
+    sock.reply({ id: sock.sent[1].id, op: 'error', error: 'boom' });
+    await err;
+    assert.strictEqual(live.size, 1);
+    sock.emit('close');
+    await closed;
+    assert.strictEqual(live.size, 0);
+});
+
+test('nreplRequestOn ignores a malformed reply line', async () => {
+    const sock = fakeSocket();
+    const p = outcome(core.nreplRequestOn(sock, { op: 'eval', code: '1' }, 1000));
+    sock.reply('not json');
+    sock.reply({ id: sock.sent[0].id, value: 'ok' });
+    assert.deepStrictEqual(await p, { ok: { value: 'ok' } });
 });
 
 test('nreplRequestOn rejects every pending request when the socket closes', async (t) => {
@@ -505,8 +596,9 @@ test('nreplRequestOn reports the socket error that ended the request', async (t)
 
 test('nreplRequestOn joins a response line split across writes', async (t) => {
     const a = await listen(t);
-    a.on('connection', (s) => s.once('data', () => {
-        s.write('{"value": "sp');
+    a.on('connection', (s) => s.once('data', (d) => {
+        const id = JSON.parse(d.toString()).id;
+        s.write(`{"id": ${id}, "value": "sp`);
         setTimeout(() => s.write('lit"}\n'), 50);
     }));
     const sock = await clientTo(t, a);
@@ -517,7 +609,7 @@ test('nreplRequestOn joins a response line split across writes', async (t) => {
 });
 
 test('nreplRequestOn keeps a multi-byte character split across reads', async (t) => {
-    const bytes = Buffer.from('{"value": "한국어"}\n');
+    const bytes = Buffer.from('{"id": 1, "value": "한국어"}\n');
     const cut = bytes.indexOf(Buffer.from('한')) + 1;
     const first = bytes.subarray(0, cut);
     assert.ok(first[first.length - 1] >= 0x80, 'the split must land inside a character');
