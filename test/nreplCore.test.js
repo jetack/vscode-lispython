@@ -642,33 +642,105 @@ test('nreplRequestOn: an eval error reply without error text gets the fallback t
     assert.deepStrictEqual(await p, { ok: { op: 'error', error: 'nREPL error' } });
 });
 
-test('serverEchoesIds: true when the probe reply carries its id', async () => {
+test('probeIdEcho: echoed when the probe reply carries its id', async () => {
     const sock = fakeSocket();
-    const p = core.serverEchoesIds(sock, 1000);
+    const p = core.probeIdEcho(sock, 1000);
     assert.deepStrictEqual(sock.sent.map((m) => m.op), ['complete']);
     sock.reply({ id: sock.sent[0].id, completions: [] });
-    assert.strictEqual(await p, true);
+    assert.strictEqual(await p, 'echoed');
 });
 
-test('serverEchoesIds: an error reply that carries the id still counts as echoing', async () => {
+test('probeIdEcho: an error reply that carries the id still counts as echoed', async () => {
     const sock = fakeSocket();
-    const p = core.serverEchoesIds(sock, 1000);
+    const p = core.probeIdEcho(sock, 1000);
     sock.reply({ id: sock.sent[0].id, op: 'error', error: 'unknown op' });
-    assert.strictEqual(await p, true);
+    assert.strictEqual(await p, 'echoed');
 });
 
-test('serverEchoesIds: false when the reply has no id (older server)', async () => {
+test('probeIdEcho: an id-less reply is missing, at once', async () => {
     const sock = fakeSocket();
-    const p = core.serverEchoesIds(sock, 30);
+    const p = core.probeIdEcho(sock, 5000);
     sock.reply({ completions: [] });
-    assert.strictEqual(await p, false);
+    assert.strictEqual(await p, 'missing');
 });
 
-test('serverEchoesIds: a socket that closes says nothing against the server', async () => {
+test('probeIdEcho: a reply with an id we never sent is missing', async () => {
     const sock = fakeSocket();
-    const p = core.serverEchoesIds(sock, 1000);
-    sock.emit('close');
-    assert.strictEqual(await p, true);
+    const p = core.probeIdEcho(sock, 5000);
+    sock.reply({ id: sock.sent[0].id + 100, completions: [] });
+    assert.strictEqual(await p, 'missing');
+});
+
+test('probeIdEcho: no reply is inconclusive, and a closed socket too', async () => {
+    const quiet = fakeSocket();
+    assert.strictEqual(await core.probeIdEcho(quiet, 30), 'inconclusive');
+    const closed = fakeSocket();
+    const p = core.probeIdEcho(closed, 1000);
+    closed.emit('close');
+    assert.strictEqual(await p, 'inconclusive');
+});
+
+test('probeIdEcho: an id-less reply settles only the probe, not other requests', async () => {
+    const sock = fakeSocket();
+    const other = outcome(core.nreplRequestOn(sock, { op: 'bogus' }, 50));
+    const probe = core.probeIdEcho(sock, 5000);
+    sock.reply({ completions: [] });
+    assert.strictEqual(await probe, 'missing');
+    assert.deepStrictEqual(await other, { err: 'nREPL request timed out after 50 ms' });
+});
+
+function fakeConn(sock) {
+    return { socket: sock, disconnects: 0, disconnect() { this.disconnects++; this.socket = undefined; } };
+}
+
+function notes() {
+    const n = { logs: [], toasts: [] };
+    n.log = (t) => n.logs.push(t);
+    n.tooOld = (t) => n.toasts.push(t);
+    return n;
+}
+
+test('checkServerIdEcho: an id-less reply shows the too-old message once and disconnects', async () => {
+    const sock = fakeSocket();
+    const conn = fakeConn(sock);
+    const n = notes();
+    const p = core.checkServerIdEcho(conn, sock, n, 5000);
+    sock.reply({ completions: [] });
+    assert.strictEqual(await p, 'missing');
+    assert.deepStrictEqual(n.toasts, [core.NREPL_NO_ID_ECHO_MESSAGE]);
+    assert.deepStrictEqual(n.logs, [core.NREPL_NO_ID_ECHO_MESSAGE]);
+    assert.strictEqual(conn.disconnects, 1);
+});
+
+test('checkServerIdEcho: no reply keeps the connection, logs, and shows no toast', async () => {
+    const sock = fakeSocket();
+    const conn = fakeConn(sock);
+    const n = notes();
+    assert.strictEqual(await core.checkServerIdEcho(conn, sock, n, 30), 'inconclusive');
+    assert.deepStrictEqual(n.toasts, []);
+    assert.deepStrictEqual(n.logs, [core.NREPL_ID_ECHO_INCONCLUSIVE_MESSAGE]);
+    assert.strictEqual(conn.disconnects, 0);
+    assert.strictEqual(conn.socket, sock);
+});
+
+test('checkServerIdEcho: an echoing server is left alone and silent', async () => {
+    const sock = fakeSocket();
+    const conn = fakeConn(sock);
+    const n = notes();
+    const p = core.checkServerIdEcho(conn, sock, n, 1000);
+    sock.reply({ id: sock.sent[0].id, completions: [] });
+    assert.strictEqual(await p, 'echoed');
+    assert.deepStrictEqual([n.logs, n.toasts, conn.disconnects], [[], [], 0]);
+});
+
+test('checkServerIdEcho: a verdict for a swapped-out socket changes nothing', async () => {
+    const sock = fakeSocket();
+    const conn = fakeConn(fakeSocket());
+    const n = notes();
+    const p = core.checkServerIdEcho(conn, sock, n, 5000);
+    sock.reply({ completions: [] });
+    assert.strictEqual(await p, 'missing');
+    assert.deepStrictEqual([n.logs, n.toasts, conn.disconnects], [[], [], 0]);
 });
 
 test('startNreplServer rejects at once when the binary cannot be spawned', async () => {

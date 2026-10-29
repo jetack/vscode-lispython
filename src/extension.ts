@@ -11,7 +11,7 @@ import {
 } from 'vscode-languageclient/node';
 import {
     chooseNreplHome, completionKindName, findNreplPortFor, getReplHtml, makeNonce, NREPL_PORT_FILE,
-    NREPL_NO_ID_ECHO_MESSAGE, NreplConnectCancelled, NreplConnection, nreplRequestOn, openFileRefusedMessage, openFileWarning, resolveActiveFile, serverEchoesIds,
+    NreplConnectCancelled, checkServerIdEcho, NreplConnection, nreplRequestOn, openFileRefusedMessage, openFileWarning, resolveActiveFile,
     resolveOpenableFile,
     NreplServerSupervisor,
 } from './nreplCore';
@@ -691,14 +691,9 @@ async function connectNrepl(port: number): Promise<void> {
     await nreplConn.connect(port);
     const sock = nreplConn.socket;
     if (!sock) return;
-    void serverEchoesIds(sock).then((echoes) => {
-        // A swapped or closed socket says nothing about the server now connected.
-        if (echoes || nreplConn.socket !== sock) return;
-        getNreplOutputChannel().appendLine(NREPL_NO_ID_ECHO_MESSAGE);
-        vscode.window.showErrorMessage(NREPL_NO_ID_ECHO_MESSAGE);
-        // Its replies can never be matched, so drop the connection: pending and later requests
-        // fail at once instead of waiting out their timeouts.
-        nreplConn.disconnect();
+    void checkServerIdEcho(nreplConn, sock, {
+        log: (text) => getNreplOutputChannel().appendLine(text),
+        tooOld: (text) => { vscode.window.showErrorMessage(text); },
     });
 }
 

@@ -123,6 +123,8 @@ interface PendingRequest {
     timer: NodeJS.Timeout | undefined;
     /** An `op: "error"` reply resolves instead of rejecting: it is the result of user code. */
     errorIsResult: boolean;
+    /** The id-echo probe: a reply that matches no request settles it as "not echoed". */
+    probe: boolean;
 }
 
 /** Bound on a tooling request (complete, macroexpand, ...) so a stuck server cannot hang it. */
@@ -154,6 +156,22 @@ export class NreplRequestTimeout extends Error {
     }
 }
 
+/** Rejection reason of a request answered by an `op: "error"` reply carrying its id. */
+export class NreplOpError extends Error {
+    constructor(message: string) {
+        super(message);
+        this.name = 'NreplOpError';
+    }
+}
+
+/** Rejection reason of the id-echo probe when the server answered without echoing its id. */
+export class NreplIdNotEchoed extends Error {
+    constructor() {
+        super('nREPL server did not echo the request id');
+        this.name = 'NreplIdNotEchoed';
+    }
+}
+
 class NreplReader {
     private buf = '';
     private nextId = 1;
@@ -169,7 +187,7 @@ class NreplReader {
     }
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any -- untyped nREPL payload
-    request(msg: Record<string, unknown>, timeoutMs: number | undefined): Promise<any> {
+    request(msg: Record<string, unknown>, timeoutMs: number | undefined, probe = false): Promise<any> {
         return new Promise((resolve, reject) => {
             const id = this.nextId++;
             // Stringify and write before registering: a throw (BigInt, cycle, write) must not
@@ -181,7 +199,7 @@ class NreplReader {
                 reject(new NreplRequestTimeout(timeoutMs));
             }, timeoutMs);
             timer?.unref();
-            this.pending.set(id, { resolve, reject, timer, errorIsResult: USER_CODE_OPS.has(msg.op) });
+            this.pending.set(id, { resolve, reject, timer, errorIsResult: USER_CODE_OPS.has(msg.op), probe });
         });
     }
 
@@ -204,18 +222,32 @@ class NreplReader {
             return; // not ours to settle: every request settles by its own id
         }
         const isObject = reply !== null && typeof reply === 'object' && !Array.isArray(reply);
-        if (!isObject || reply.id === undefined || reply.id === null) return;
+        if (!isObject) return;
+        const matched = reply.id === undefined || reply.id === null ? undefined : this.pending.get(reply.id);
+        if (matched === undefined) {
+            // Settles nothing real, but proves the server answers without echoing our id.
+            this.rejectProbes();
+            return;
+        }
         const { id, ...payload } = reply;
-        const req = this.pending.get(id);
-        if (req === undefined) return; // unknown id: nobody is waiting for it
+        const req = matched;
         this.pending.delete(id);
         clearTimeout(req.timer);
         if (payload.op === 'error' && !req.errorIsResult) {
-            req.reject(new Error(typeof payload.error === 'string' ? payload.error : 'nREPL error'));
+            req.reject(new NreplOpError(typeof payload.error === 'string' ? payload.error : 'nREPL error'));
         } else {
             req.resolve(payload.op === 'error' && typeof payload.error !== 'string'
                 ? { ...payload, error: 'nREPL error' }
                 : payload);
+        }
+    }
+
+    private rejectProbes() {
+        for (const [id, r] of [...this.pending]) {
+            if (!r.probe) continue;
+            this.pending.delete(id);
+            clearTimeout(r.timer);
+            r.reject(new NreplIdNotEchoed());
         }
     }
 
@@ -256,6 +288,7 @@ export function nreplRequestOn(
     sock: net.Socket,
     msg: Record<string, unknown>,
     timeoutMs: number | undefined = nreplTimeoutFor(msg),
+    probe = false,
     // eslint-disable-next-line @typescript-eslint/no-explicit-any -- untyped nREPL payload
 ): Promise<any> {
     if (sock.destroyed) return Promise.reject(new Error('nREPL not connected'));
@@ -264,7 +297,7 @@ export function nreplRequestOn(
         reader = new NreplReader(sock);
         readers.set(sock, reader);
     }
-    return reader.request(msg, timeoutMs);
+    return reader.request(msg, timeoutMs, probe);
 }
 
 export const NREPL_ID_ECHO_TIMEOUT_MS = 3000;
@@ -272,21 +305,52 @@ export const NREPL_ID_ECHO_TIMEOUT_MS = 3000;
 export const NREPL_NO_ID_ECHO_MESSAGE =
     'The nREPL server does not echo request ids: it is too old. Upgrade lispython.';
 
+export type IdEchoProbe = 'echoed' | 'missing' | 'inconclusive';
+
 /**
- * Probe a fresh connection with one cheap request. A server that does not echo request ids
- * never settles it, so a timeout means "too old"; any other failure (socket closed, an error
- * reply that does carry the id) says nothing against the server and counts as echoing.
+ * Probe a fresh connection with one cheap request. An old server still replies, just
+ * without the id, so 'missing' needs that positive evidence: a reply that carries no id or
+ * one we never sent. A timeout is 'inconclusive' (a busy server is not an old one), as is
+ * any other failure such as a closed socket; an error reply that carries the id is 'echoed'.
  */
-export async function serverEchoesIds(
+export async function probeIdEcho(
     sock: net.Socket,
     timeoutMs = NREPL_ID_ECHO_TIMEOUT_MS,
-): Promise<boolean> {
+): Promise<IdEchoProbe> {
     try {
-        await nreplRequestOn(sock, { op: 'complete', prefix: '' }, timeoutMs);
+        await nreplRequestOn(sock, { op: 'complete', prefix: '' }, timeoutMs, true);
     } catch (err) {
-        return !(err instanceof NreplRequestTimeout);
+        if (err instanceof NreplIdNotEchoed) return 'missing';
+        return err instanceof NreplOpError ? 'echoed' : 'inconclusive';
     }
-    return true;
+    return 'echoed';
+}
+
+export const NREPL_ID_ECHO_INCONCLUSIVE_MESSAGE =
+    'nREPL id-echo check got no reply in time; keeping the connection.';
+
+/**
+ * Probe `sock` and act on the verdict. 'missing' reports the server as too old and drops the
+ * connection, whose replies can never be matched, so pending and later requests fail at once.
+ * 'inconclusive' only logs: a busy server is not an old one. A verdict for a socket that is no
+ * longer `conn`'s current one says nothing about the server now connected.
+ */
+export async function checkServerIdEcho(
+    conn: { readonly socket: net.Socket | undefined; disconnect(): void },
+    sock: net.Socket,
+    notify: { log(text: string): void; tooOld(text: string): void },
+    timeoutMs?: number,
+): Promise<IdEchoProbe> {
+    const verdict = await probeIdEcho(sock, timeoutMs);
+    if (conn.socket !== sock) return verdict;
+    if (verdict === 'missing') {
+        notify.log(NREPL_NO_ID_ECHO_MESSAGE);
+        notify.tooOld(NREPL_NO_ID_ECHO_MESSAGE);
+        conn.disconnect();
+    } else if (verdict === 'inconclusive') {
+        notify.log(NREPL_ID_ECHO_INCONCLUSIVE_MESSAGE);
+    }
+    return verdict;
 }
 
 /** Rejection reason of a connect() superseded by a later connect() or by disconnect(). */
