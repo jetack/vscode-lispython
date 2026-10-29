@@ -277,6 +277,20 @@ class NreplReader {
 const readers = new WeakMap<net.Socket, NreplReader>();
 
 /**
+ * The nREPL `eval` request for `code`, which starts at `startOffset` in `doc`. `file`, `line` and
+ * `column` (1-based, the position of the code's first character) let the server report errors at
+ * the editor position instead of `<nrepl-N>`; `startOffset` must be the first character actually sent.
+ */
+export function evalMessage(
+    code: string,
+    doc: { uri: { fsPath: string }; positionAt(offset: number): { line: number; character: number } },
+    startOffset: number,
+): Record<string, unknown> {
+    const start = doc.positionAt(startOffset);
+    return { op: 'eval', code, file: doc.uri.fsPath, line: start.line + 1, column: start.character + 1 };
+}
+
+/**
  * Send one newline-delimited JSON request on `sock` and resolve with its reply (the
  * echoed `id` stripped). Requests may overlap: the socket's single reader routes each
  * reply to its request. Rejects if the socket errors or closes first (e.g. the server

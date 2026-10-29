@@ -966,3 +966,25 @@ test('NreplServerSupervisor: stop while a restart awaits the old server cancels 
         fake.cleanup();
     }
 });
+
+function fakeDoc(text, fsPath) {
+    return {
+        uri: { fsPath },
+        positionAt(offset) {
+            const before = text.slice(0, offset).split('\n');
+            return { line: before.length - 1, character: before[before.length - 1].length };
+        },
+    };
+}
+
+test('evalMessage: file/line/column are 1-based at the first character sent', () => {
+    const text = '(a)\n  (b 1)\n(c)\n';
+    const doc = fakeDoc(text, '/w/x.lpy');
+    const at = (needle) => core.evalMessage(needle, doc, text.indexOf(needle));
+    assert.deepStrictEqual(core.evalMessage(text, doc, 0),
+        { op: 'eval', code: text, file: '/w/x.lpy', line: 1, column: 1 }, 'whole document');
+    assert.deepStrictEqual(at('(b 1)'),
+        { op: 'eval', code: '(b 1)', file: '/w/x.lpy', line: 2, column: 3 }, 'mid-line start');
+    assert.deepStrictEqual(at('(c)'),
+        { op: 'eval', code: '(c)', file: '/w/x.lpy', line: 3, column: 1 }, 'top-level form');
+});
