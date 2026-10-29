@@ -235,9 +235,9 @@ const readers = new WeakMap<net.Socket, NreplReader>();
  * echoed `id` stripped). Requests may overlap: the socket's single reader routes each
  * reply to its request. Rejects if the socket errors or closes first (e.g. the server
  * died or the connection was swapped), when the server answers with an `op: "error"`
- * reply for it, or after `timeoutMs` without a reply (by default only for non-eval ops, see nreplTimeoutFor), so a caller never waits forever.
+ * reply for it, or after `timeoutMs` without a reply. The default timeout
+ * (nreplTimeoutFor) applies to tooling ops only; eval and load-file wait for their reply.
  */
-// eslint-disable-next-line @typescript-eslint/no-explicit-any -- untyped nREPL payload
 export function nreplRequestOn(
     sock: net.Socket,
     msg: Record<string, unknown>,
