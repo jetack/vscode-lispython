@@ -1,3 +1,4 @@
+import fs from "node:fs";
 import esbuild from "esbuild";
 
 const production = process.argv.includes("--production");
@@ -18,6 +19,9 @@ const options = {
   sourcemap: !production,
   logLevel: "info",
 };
+
+// A production bundle must never sit beside a stale dev .map from an earlier build.
+if (production) fs.rmSync(`${options.outfile}.map`, { force: true });
 
 try {
   if (watch) {
