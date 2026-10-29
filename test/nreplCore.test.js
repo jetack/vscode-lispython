@@ -966,3 +966,67 @@ test('NreplServerSupervisor: stop while a restart awaits the old server cancels 
         fake.cleanup();
     }
 });
+
+function fakeDoc(text, fsPath, extra = {}) {
+    return {
+        uri: { fsPath, scheme: 'file' },
+        isUntitled: false,
+        positionAt(offset) {
+            const before = text.slice(0, offset).split('\n');
+            return { line: before.length - 1, character: before[before.length - 1].length };
+        },
+        lineAt: (line) => ({ text: text.split('\n')[line] ?? '' }),
+        ...extra,
+    };
+}
+
+test('evalMessage: file/line/column are 1-based at the first character sent', () => {
+    const text = '(a)\n  (b 1)\n(c)\n';
+    const doc = fakeDoc(text, '/w/x.lpy');
+    const at = (needle) => {
+        const start = text.indexOf(needle);
+        return core.evalMessage(needle, doc, [start, start + needle.length]);
+    };
+    assert.deepStrictEqual(core.evalMessage(text, doc, [0, text.length]),
+        { op: 'eval', code: text, file: '/w/x.lpy', line: 1, column: 1 }, 'whole document');
+    assert.deepStrictEqual(at('(b 1)'),
+        { op: 'eval', code: '(b 1)', file: '/w/x.lpy', line: 2, column: 3 }, 'mid-line start');
+    assert.deepStrictEqual(at('(c)'),
+        { op: 'eval', code: '(c)', file: '/w/x.lpy', line: 3, column: 1 }, 'top-level form');
+});
+
+test('evalMessage: column counts code points, not UTF-16 units', () => {
+    const text = '(a "😀😀") (b)';
+    const start = text.indexOf('(b)');
+    assert.strictEqual(start, 11, 'two emoji are 4 UTF-16 units but 2 code points: column 10, not 12');
+    assert.deepStrictEqual(core.evalMessage('(b)', fakeDoc(text, '/w/e.lpy'), [start, start + 3]),
+        { op: 'eval', code: '(b)', file: '/w/e.lpy', line: 1, column: 10 });
+});
+
+test('evalMessage: position past the server caps is dropped with the file', () => {
+    const lastCol = core.NREPL_MAX_EVAL_COLUMN;
+    const wide = 'x'.repeat(lastCol + 5);
+    const doc = fakeDoc(wide, '/w/min.lpy');
+    const col = (c) => core.evalMessage('x', doc, [c - 1, c]);
+    assert.deepStrictEqual(col(lastCol),
+        { op: 'eval', code: 'x', file: '/w/min.lpy', line: 1, column: lastCol }, 'at the column cap');
+    assert.deepStrictEqual(col(lastCol + 1),
+        { op: 'eval', code: 'x' }, 'past the column cap');
+
+    const lastLine = core.NREPL_MAX_EVAL_LINE;
+    const tall = fakeDoc('', '/w/tall.lpy', { positionAt: (o) => ({ line: o, character: 0 }) });
+    const line = (l) => core.evalMessage('x', tall, [l - 1, l]);
+    assert.deepStrictEqual(line(lastLine),
+        { op: 'eval', code: 'x', file: '/w/tall.lpy', line: lastLine, column: 1 }, 'at the line cap');
+    assert.deepStrictEqual(line(lastLine + 1),
+        { op: 'eval', code: 'x' }, 'past the line cap');
+});
+
+test('evalMessage: untitled and non-file documents send no file or position', () => {
+    assert.deepStrictEqual(
+        core.evalMessage('(a)', fakeDoc('(a)', 'Untitled-1', { isUntitled: true, uri: { fsPath: 'Untitled-1', scheme: 'untitled' } }), [0, 3]),
+        { op: 'eval', code: '(a)' }, 'untitled');
+    assert.deepStrictEqual(
+        core.evalMessage('(a)', fakeDoc('(a)', '/x.lpy', { uri: { fsPath: '/x.lpy', scheme: 'vscode-remote' } }), [0, 3]),
+        { op: 'eval', code: '(a)' }, 'non-file scheme');
+});

@@ -11,7 +11,7 @@ import {
 } from 'vscode-languageclient/node';
 import {
     chooseNreplHome, completionKindName, findNreplPortFor, getReplHtml, makeNonce, NREPL_PORT_FILE,
-    NreplConnectCancelled, checkServerIdEcho, NreplConnection, nreplRequestOn, openFileRefusedMessage, openFileWarning, resolveActiveFile,
+    NreplConnectCancelled, checkServerIdEcho, NreplConnection, evalMessage, nreplRequestOn, openFileRefusedMessage, openFileWarning, resolveActiveFile,
     resolveOpenableFile,
     NreplServerSupervisor,
 } from './nreplCore';
@@ -766,8 +766,8 @@ async function connectNreplFromPortFile(): Promise<void> {
     }
 }
 
-function nreplEval(code: string): Promise<{ value?: string; stdout?: string; error?: string }> {
-    return nreplRequest({ op: 'eval', code });
+function nreplEval(code: string, doc: vscode.TextDocument, range: [number, number]): Promise<{ value?: string; stdout?: string; error?: string }> {
+    return nreplRequest(evalMessage(code, doc, range));
 }
 
 /** Send an arbitrary JSON request to the nREPL and return the parsed response. */
@@ -780,7 +780,7 @@ function nreplRequest(msg: Record<string, unknown>): Promise<any> {
 
 async function evalAndShow(code: string, editor: vscode.TextEditor, range: [number, number]): Promise<void> {
     try {
-        const result = await nreplEval(code);
+        const result = await nreplEval(code, editor.document, range);
         appendToReplPanel(code, result);
 
         // Also show inline decoration briefly
