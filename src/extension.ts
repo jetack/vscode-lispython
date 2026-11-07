@@ -14,7 +14,7 @@ import {
     NreplConnectCancelled, checkServerIdEcho, NreplConnection, evalMessage, completeMessage, macroexpandMessage, nreplRequestOn, openFileRefusedMessage, openFileWarning, resolveActiveFile,
     resolveOpenableFile, nreplFileOf,
     NreplServerSupervisor, panelCompleteMessage, panelEvalMessage, ReplScopeState, replScopeChoices,
-    replScopeView, symbolPrefixStart, runtimeOnlyItems,
+    replScopeView, symbolPrefixStart, mergeCompletionResults,
 } from './nreplCore';
 
 let client: LanguageClient | undefined;
@@ -240,22 +240,20 @@ async function startLspServer(): Promise<void> {
             provideCompletionItem: async (document, position, context, token, next) => {
                 const [lsp, runtime] = await Promise.allSettled([
                     next(document, position, context, token),
-                    fetchNreplCompletions(document, position),
+                    token.isCancellationRequested
+                        ? Promise.resolve(undefined)
+                        : fetchNreplCompletions(document, position),
                 ]);
-                const lspResult = lsp.status === 'fulfilled' ? lsp.value : undefined;
-                if (lsp.status === 'rejected' && runtime.status !== 'fulfilled') throw lsp.reason;
+                // fetchNreplCompletions never rejects
                 const fetched = runtime.status === 'fulfilled' ? runtime.value : undefined;
-                if (!fetched) {
-                    if (lsp.status === 'rejected') throw lsp.reason;
-                    return lspResult;
-                }
-                const lspItems = Array.isArray(lspResult) ? lspResult : lspResult?.items ?? [];
-                const extra = toVscodeCompletionItems(
-                    runtimeOnlyItems(lspItems.map((i) => i.label), fetched.items), fetched.range);
-                if (extra.length === 0) return lspResult ?? undefined;
-                const merged = [...lspItems, ...extra];
-                if (lspResult && !Array.isArray(lspResult)) {
-                    return new vscode.CompletionList(merged, lspResult.isIncomplete);
+                const merged = mergeCompletionResults(lsp, fetched?.items ?? [], (entry) => {
+                    const item = toVscodeCompletionItems([entry], fetched!.range)[0];
+                    // VS Code orders by sortText, not array order: keep runtime names after the LSP's
+                    item.sortText = '￿' + entry.label;
+                    return item;
+                });
+                if (merged && !Array.isArray(merged)) {
+                    return new vscode.CompletionList(merged.items, merged.isIncomplete);
                 }
                 return merged;
             },
