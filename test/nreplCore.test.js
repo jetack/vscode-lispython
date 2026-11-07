@@ -1030,3 +1030,17 @@ test('evalMessage: untitled and non-file documents send no file or position', ()
         core.evalMessage('(a)', fakeDoc('(a)', '/x.lpy', { uri: { fsPath: '/x.lpy', scheme: 'vscode-remote' } }), [0, 3]),
         { op: 'eval', code: '(a)' }, 'non-file scheme');
 });
+
+test('completeMessage/macroexpandMessage use the eval file path, and none for untitled or non-file docs', () => {
+    const doc = fakeDoc('(a)', '/w/f.lpy');
+    const file = core.evalMessage('(a)', doc, [0, 3]).file;
+    assert.strictEqual(file, '/w/f.lpy');
+    assert.deepStrictEqual(core.completeMessage('ab', doc), { op: 'complete', prefix: 'ab', file });
+    assert.deepStrictEqual(core.macroexpandMessage('(a)', doc), { op: 'macroexpand', code: '(a)', file });
+    const untitled = fakeDoc('(a)', 'Untitled-1', { isUntitled: true, uri: { fsPath: 'Untitled-1', scheme: 'untitled' } });
+    const remote = fakeDoc('(a)', '/x.lpy', { uri: { fsPath: '/x.lpy', scheme: 'vscode-remote' } });
+    for (const d of [untitled, remote]) {
+        assert.deepStrictEqual(core.completeMessage('ab', d), { op: 'complete', prefix: 'ab' });
+        assert.deepStrictEqual(core.macroexpandMessage('(a)', d), { op: 'macroexpand', code: '(a)' });
+    }
+});

@@ -11,7 +11,7 @@ import {
 } from 'vscode-languageclient/node';
 import {
     chooseNreplHome, completionKindName, findNreplPortFor, getReplHtml, makeNonce, NREPL_PORT_FILE,
-    NreplConnectCancelled, checkServerIdEcho, NreplConnection, evalMessage, nreplRequestOn, openFileRefusedMessage, openFileWarning, resolveActiveFile,
+    NreplConnectCancelled, checkServerIdEcho, NreplConnection, evalMessage, completeMessage, macroexpandMessage, nreplRequestOn, openFileRefusedMessage, openFileWarning, resolveActiveFile,
     resolveOpenableFile,
     NreplServerSupervisor,
 } from './nreplCore';
@@ -899,7 +899,7 @@ async function macroexpand(): Promise<void> {
     }
 
     try {
-        const result = await nreplRequest({ op: 'macroexpand', code });
+        const result = await nreplRequest(macroexpandMessage(code, editor.document));
         appendToReplPanel(`(macroexpand '${code})`, {
             value: result.expansion,
             error: result.error,
@@ -936,7 +936,7 @@ class NreplCompletionProvider implements vscode.CompletionItemProvider {
         if (!prefix) return undefined;
 
         try {
-            const result = await nreplRequest({ op: 'complete', prefix });
+            const result = await nreplRequest(completeMessage(prefix, document));
             if (!result.completions || !Array.isArray(result.completions)) {
                 return undefined;
             }
