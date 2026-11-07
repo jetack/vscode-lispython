@@ -224,7 +224,8 @@ function makeElement() {
         setSelectionRange(a, b) { this.selectionStart = a; this.selectionEnd = b; },
         appendChild(child) { this.children.push(child); },
         contains: () => false,
-        focus() {},
+        focused: false,
+        focus() { this.focused = true; },
         scrollIntoView() {},
     };
 }
@@ -338,6 +339,23 @@ webviewTest('webview: Tab completes the symbol before the caret', (core) => {
     assert.strictEqual(w.input.value, '(print');
     assert.strictEqual(w.els.candidates.hidden, false);
     assert.ok(w.els.candidates.textContent.includes('printf'));
+});
+
+webviewTest('webview: a completions reply is dropped when the caret moved since its request', (core) => {
+    const w = loadReplWebview(core);
+    w.type('(foo-ba x)', 7);
+    w.key('Tab');
+    const { requestId } = w.posted.at(-1);
+    // Moving the caret fires no input event, so only the reply-time check can catch it.
+    w.input.setSelectionRange(1, 1);
+    w.send({ type: 'completions', requestId, items: ['foo-bar'] });
+    assert.strictEqual(w.input.value, '(foo-ba x)');
+});
+
+webviewTest('webview: focusInput focuses the input', (core) => {
+    const w = loadReplWebview(core);
+    w.send({ type: 'focusInput' });
+    assert.strictEqual(w.input.focused, true);
 });
 
 test('findNreplPortFor: active file walks up its own root, else folders in order', (t) => {
@@ -1185,32 +1203,32 @@ test('replScopeLabel: __main__, relative inside the deepest workspace root, abso
     assert.strictEqual(core.replScopeLabel('/tmp/foo.lpy', []), '/tmp/foo.lpy');
 });
 
-test('replScopeChoices: __main__ first, open and loaded merged, current flagged, sorted', () => {
+test('replScopeChoices: __main__ first, open and in-nREPL merged, current flagged, sorted', () => {
     const roots = ['/w'];
     const view = (cs) => cs.map((c) => [c.label, c.description, c.scope, c.current]);
     assert.deepStrictEqual(
         view(core.replScopeChoices(['/w/b.lpy', '/w/a.lpy'], ['/w/b.lpy', '/x/c.lpy'], '/w/a.lpy', roots)),
         [
             ['__main__', 'session scope', undefined, false],
-            ['/x/c.lpy', 'loaded', '/x/c.lpy', false],
+            ['/x/c.lpy', 'in nREPL', '/x/c.lpy', false],
             ['a.lpy', 'open', '/w/a.lpy', true],
-            ['b.lpy', 'open, loaded', '/w/b.lpy', false],
+            ['b.lpy', 'open, in nREPL', '/w/b.lpy', false],
         ]);
     // The current scope stays listed after its file is closed; __main__ is current by default.
     assert.deepStrictEqual(core.replScopeChoices([], [], '/w/gone.lpy', roots).map((c) => c.scope), [undefined, '/w/gone.lpy']);
     assert.strictEqual(core.replScopeChoices([], [], undefined, roots)[0].current, true);
 });
 
-test('ReplScopeState: answered requests mark their file loaded; a new connection clears them, not the scope', () => {
+test('ReplScopeState: answered requests mark their file scoped; a new connection clears them, not the scope', () => {
     const s = new core.ReplScopeState();
     s.noteAnswered({ op: 'eval', code: '1', file: '/w/a.lpy', line: 1, column: 1 });
     s.noteAnswered({ op: 'load-file', path: '/w/b.lpy' });
     s.noteAnswered({ op: 'complete', prefix: 'x', ns: '/w/c.lpy' });
     s.noteAnswered({ op: 'eval', code: '1' });
-    assert.deepStrictEqual([...s.loaded].sort(), ['/w/a.lpy', '/w/b.lpy', '/w/c.lpy']);
+    assert.deepStrictEqual([...s.scoped].sort(), ['/w/a.lpy', '/w/b.lpy', '/w/c.lpy']);
     s.current = '/w/a.lpy';
     s.connectionReset();
-    assert.deepStrictEqual([...s.loaded], []);
+    assert.deepStrictEqual([...s.scoped], []);
     assert.strictEqual(s.current, '/w/a.lpy');
 });
 

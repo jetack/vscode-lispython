@@ -399,7 +399,7 @@ export interface ReplScopeViewData {
 
 export interface ReplScopeChoice {
     label: string;
-    /** "session scope", or which of open / loaded the file is. */
+    /** "session scope", or which of open / in nREPL the file is. */
     description: string;
     scope: ReplScope;
     current: boolean;
@@ -408,21 +408,21 @@ export interface ReplScopeChoice {
 /**
  * Quick-pick items for Set REPL Scope: `__main__` first, then every file that is open or that
  * the server has a scope for, once each, ordered by label then path. The current scope is
- * always listed, even when it is neither open nor loaded any more.
+ * always listed, even when it is neither open nor in the nREPL any more.
  */
 export function replScopeChoices(
     openFiles: Iterable<string>,
-    loadedFiles: Iterable<string>,
+    scopedFiles: Iterable<string>,
     current: ReplScope,
     workspaceRoots: readonly string[],
 ): ReplScopeChoice[] {
     const open = new Set(openFiles);
-    const loaded = new Set(loadedFiles);
-    const files = new Set([...open, ...loaded]);
+    const scoped = new Set(scopedFiles);
+    const files = new Set([...open, ...scoped]);
     if (current !== undefined) files.add(current);
     const fileChoices = [...files].map((file): ReplScopeChoice => ({
         label: replScopeLabel(file, workspaceRoots),
-        description: [open.has(file) ? 'open' : '', loaded.has(file) ? 'loaded' : ''].filter(Boolean).join(', '),
+        description: [open.has(file) ? 'open' : '', scoped.has(file) ? 'in nREPL' : ''].filter(Boolean).join(', '),
         scope: file,
         current: file === current,
     }));
@@ -441,22 +441,28 @@ export function replScopeChoices(
  */
 export class ReplScopeState {
     current: ReplScope = undefined;
-    private readonly loadedFiles = new Set<string>();
+    private readonly scopedFiles = new Set<string>();
 
-    get loaded(): ReadonlySet<string> {
-        return this.loadedFiles;
+    /** Files the server has a scope for, as far as this extension has seen. */
+    get scoped(): ReadonlySet<string> {
+        return this.scopedFiles;
     }
 
     /** Record the scope `msg` created; call once the server has answered it. */
     noteAnswered(msg: Record<string, unknown>): void {
         const field = msg.op === 'load-file' ? 'path' : (typeof msg.file === 'string' ? 'file' : NREPL_NS_FIELD);
         const file = msg[field];
-        if (typeof file === 'string') this.loadedFiles.add(file);
+        if (typeof file === 'string') this.scopedFiles.add(file);
     }
 
-    /** A new connection is a new server with no file scopes; the panel's scope is created again on demand. */
+    /**
+     * Forget the scoped files on every new connection: the new socket may be a different
+     * server (Connect via .nrepl-port can attach to any), and the list must never claim a scope
+     * the server lacks. Under-reporting is harmless: `ns` creates a scope on demand, which is
+     * also why the panel's current scope is kept.
+     */
     connectionReset(): void {
-        this.loadedFiles.clear();
+        this.scopedFiles.clear();
     }
 }
 
@@ -776,7 +782,7 @@ function scriptLiteral(value: unknown): string {
  * Webview → extension messages: `eval {code}`, `complete {prefix, requestId}`, `pickScope`,
  * `openFile {file, line}`. Extension → webview: `eval {code, result, prompt?}` (prompt
  * defaults to `repl`), `clear` (entries only), `scope {label, title}`,
- * `completions {requestId, items}`.
+ * `completions {requestId, items}`, `focusInput`.
  */
 export function getReplHtml(
     nonce: string,
@@ -960,6 +966,7 @@ export function getReplHtml(
     const msg = e.data;
     if (msg.type === 'clear') { entries.innerHTML = ''; return; }
     if (msg.type === 'scope') { renderScope(msg); return; }
+    if (msg.type === 'focusInput') { input.focus(); return; }
     if (msg.type === 'completions') { applyCompletions(msg.requestId, msg.items); return; }
     if (msg.type !== 'eval') return;
     const { code, result } = msg;

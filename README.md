@@ -41,7 +41,8 @@ The LSP server will restart with the selected interpreter.
 |---|---|
 | `LisPython: Select Python Interpreter` | Pick the Python interpreter for the LSP server |
 | `LisPython: Restart Language Server` | Restart the LSP server after changing settings |
-| `LisPython: Set REPL Scope` | Pick the scope the REPL panel input runs in: `__main__` (the session) or an open or loaded file |
+| `LisPython: Set REPL Scope` | Pick the scope the REPL panel input runs in: `__main__` (the session) or a LisPython file that is open or already has a scope in the nREPL |
+| `LisPython: Show REPL` | Open the REPL panel and focus its input |
 
 The REPL panel has an input line: Enter evaluates it in the scope shown in the panel header (click the header to change it), Shift+Enter inserts a newline, Tab completes the symbol before the caret, and Up/Down recall earlier inputs.
 

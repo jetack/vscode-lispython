@@ -80,6 +80,10 @@
       {
         "command": "lispython.setReplScope",
         "title": "LisPython: Set REPL Scope"
+      },
+      {
+        "command": "lispython.showRepl",
+        "title": "LisPython: Show REPL"
       }
     ],
     "menus": {

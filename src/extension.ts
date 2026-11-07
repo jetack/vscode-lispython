@@ -714,7 +714,7 @@ async function setReplScope(): Promise<void> {
         .filter((d) => d.languageId === 'lispython')
         .map((d) => nreplFileOf(d))
         .filter((f): f is string => f !== undefined);
-    const choices = replScopeChoices(open, replScope.loaded, replScope.current, roots);
+    const choices = replScopeChoices(open, replScope.scoped, replScope.current, roots);
     // Labels render $(codicon) syntax; a file name is not markup.
     const items = choices.map((c) => ({
         label: (c.current ? '$(check) ' : '') + c.label.replace(/\$\(/g, '$​('),
@@ -730,6 +730,17 @@ async function setReplScope(): Promise<void> {
     if (!picked) return;
     replScope.current = picked.choice.scope;
     postReplScope();
+    showReplPanel();
+}
+
+/**
+ * Open the REPL panel if needed and reveal it with the input focused: the user asked for it.
+ * Editor evals use getOrCreateReplPanel alone, which keeps focus in the editor.
+ */
+function showReplPanel(): void {
+    const panel = getOrCreateReplPanel();
+    panel.reveal(panel.viewColumn ?? vscode.ViewColumn.Two, false);
+    panel.webview.postMessage({ type: 'focusInput' });
 }
 
 function updateNreplStatus(connected: boolean): void {
@@ -1190,6 +1201,7 @@ export async function activate(context: vscode.ExtensionContext) {
         vscode.commands.registerCommand('lispython.loadFileToRepl', loadFileToRepl),
         vscode.commands.registerCommand('lispython.macroexpand', macroexpand),
         vscode.commands.registerCommand('lispython.setReplScope', setReplScope),
+        vscode.commands.registerCommand('lispython.showRepl', showReplPanel),
     );
 
     // Completion provider (nREPL-backed)
