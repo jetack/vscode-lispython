@@ -749,15 +749,15 @@ export function symbolPrefixStart(text: string, caret: number): number {
 }
 
 /**
- * The text before the caret that every label of a `complete` reply replaces, given the
- * reply's `word` field and the typed `prefix`. A server that labels by the segment after
- * the prefix's last `.` sends `word` (the typed part of that segment, in JS string units);
- * an older server sends no `word` and full dotted labels, which replace the whole prefix.
- * A `word` the prefix does not end with is untrusted and falls back to the whole prefix.
- * The one replace rule for editor and panel completion; injected into the webview.
+ * Start of the text that every label of a `complete` reply replaces, given the caret, the
+ * typed `prefix` ending at it, and the reply's `word` field. A server that labels by the
+ * segment after the prefix's last `.` sends `word` (the typed part of that segment, in JS
+ * string units); an older server sends no `word` and full dotted labels, which replace the
+ * whole prefix. A `word` the prefix does not end with is untrusted and falls back to the
+ * whole prefix. The one replace rule for editor and panel completion; injected into the webview.
  */
-export function nreplReplacedText(word: unknown, prefix: string): string {
-    return typeof word === 'string' && prefix.endsWith(word) ? word : prefix;
+export function nreplReplaceStart(caret: number, prefix: string, word: unknown): number {
+    return caret - (typeof word === 'string' && prefix.endsWith(word) ? word : prefix).length;
 }
 
 /** Longest common prefix of `items` ('' for none). */
@@ -860,7 +860,7 @@ function scriptLiteral(value: unknown): string {
  * `openFile {file, line}`. Extension → webview: `eval {code, result, prompt?}` (prompt
  * defaults to `repl`), `clear` (entries only), `scope {label, title}`,
  * `completions {requestId, items, word?}` (`word`: the `complete` reply's raw field, untrusted;
- * the webview resolves it with nreplReplacedText), `focusInput`.
+ * the webview resolves it with nreplReplaceStart), `focusInput`.
  */
 export function getReplHtml(
     nonce: string,
@@ -1003,8 +1003,8 @@ export function getReplHtml(
     // Edited since the request: the answer is for text that is gone.
     if (input.value !== pending.value || input.selectionStart !== pending.caret) return;
     const names = Array.isArray(items) ? items.filter((s) => typeof s === 'string') : [];
-    const replaced = nreplReplacedText(word, pending.prefix);
-    const start = pending.caret - replaced.length;
+    const start = nreplReplaceStart(pending.caret, pending.prefix, word);
+    const replaced = pending.value.slice(start, pending.caret);
     const replaceWith = (text) => setInput(
       pending.value.slice(0, start) + text + pending.value.slice(pending.caret),
       start + text.length);
@@ -1078,7 +1078,7 @@ export function getReplHtml(
 
   ${injectWebviewFunction(longestCommonPrefix, 'longestCommonPrefix')}
 
-  ${injectWebviewFunction(nreplReplacedText, 'nreplReplacedText')}
+  ${injectWebviewFunction(nreplReplaceStart, 'nreplReplaceStart')}
 
   document.addEventListener('click', (e) => {
     const link = e.target.closest('.file-link');

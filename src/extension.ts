@@ -14,7 +14,7 @@ import {
     NreplConnectCancelled, checkServerIdEcho, NreplConnection, evalMessage, completeMessage, macroexpandMessage, nreplRequestOn, openFileRefusedMessage, openFileWarning, resolveActiveFile,
     resolveOpenableFile, nreplFileOf,
     NreplServerSupervisor, panelCompleteMessage, panelEvalMessage, ReplScopeState, replScopeChoices,
-    replScopeView, symbolPrefixStart, mergeCompletionResults, nreplReplacedText,
+    replScopeView, symbolPrefixStart, mergeCompletionResults, nreplReplaceStart,
 } from './nreplCore';
 
 let client: LanguageClient | undefined;
@@ -724,7 +724,7 @@ async function evalFromPanel(code: string): Promise<void> {
 
 /**
  * Completions for the panel input; never starts a server, and any failure is no completions.
- * `word` is the reply's raw field: the webview resolves it with nreplReplacedText.
+ * `word` is the reply's raw field: the webview resolves it with nreplReplaceStart.
  */
 async function completeFromPanel(prefix: string): Promise<{ items: string[]; word?: unknown }> {
     if (!nreplConnected()) return { items: [] };
@@ -1070,7 +1070,7 @@ async function fetchNreplCompletions(
         const items = nreplCompletionItems(result);
         if (items.length === 0) return undefined;
         // Labels replace only the reply's word (e.g. `nl` of `heapq.nl`), or the whole prefix.
-        const replacedStart = position.character - nreplReplacedText(result.word, prefix).length;
+        const replacedStart = nreplReplaceStart(position.character, prefix, result.word);
         return { items, range: new vscode.Range(position.line, replacedStart, position.line, position.character) };
     } catch {
         return undefined;
