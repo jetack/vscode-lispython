@@ -337,6 +337,130 @@ export function evalMessage(
 }
 
 /**
+ * The request field naming the scope an eval/complete/macroexpand runs in, without making it
+ * the eval's filename. Other side of the contract: lispython src/lispy/tools.lpy
+ * `_nrepl-request-scope`, which reads this field and rejects a value that is not an absolute
+ * path; `file` wins when both are sent.
+ */
+export const NREPL_NS_FIELD = 'ns';
+
+/** The REPL panel's scope: an absolute file path (as nreplFileOf spells it), or undefined for the session scope. */
+export type ReplScope = string | undefined;
+
+export const MAIN_SCOPE_LABEL = '__main__';
+
+// The panel never sends file/line/column: its code is not text of the file, so the eval must
+// stay `<nrepl-N>` and leave linecache alone. ns picks the scope only.
+function withScope(msg: Record<string, unknown>, scope: ReplScope): Record<string, unknown> {
+    return scope === undefined ? msg : { ...msg, [NREPL_NS_FIELD]: scope };
+}
+
+/** `eval` request for code typed into the REPL panel, run in `scope`. */
+export function panelEvalMessage(code: string, scope: ReplScope): Record<string, unknown> {
+    return withScope({ op: 'eval', code }, scope);
+}
+
+/** `complete` request for the REPL panel input, answered from `scope`. */
+export function panelCompleteMessage(prefix: string, scope: ReplScope): Record<string, unknown> {
+    return withScope({ op: 'complete', prefix }, scope);
+}
+
+/** The deepest workspace root containing `file`, if any. */
+function containingRoot(file: string, workspaceRoots: readonly string[]): string | undefined {
+    let best: string | undefined;
+    for (const root of workspaceRoots) {
+        if (isInside(path.resolve(root), file) && (best === undefined || root.length > best.length)) best = root;
+    }
+    return best;
+}
+
+/** How the panel names `scope`: `__main__`, a path relative to its workspace folder, else the absolute path. */
+export function replScopeLabel(scope: ReplScope, workspaceRoots: readonly string[]): string {
+    if (scope === undefined) return MAIN_SCOPE_LABEL;
+    const root = containingRoot(scope, workspaceRoots);
+    return root === undefined ? scope : path.relative(path.resolve(root), scope);
+}
+
+/** What the panel header and its entry prompts show for `scope`. */
+export function replScopeView(scope: ReplScope, workspaceRoots: readonly string[]): ReplScopeViewData {
+    return scope === undefined
+        ? { label: MAIN_SCOPE_LABEL, title: `${MAIN_SCOPE_LABEL} (session scope)`, prompt: MAIN_SCOPE_LABEL }
+        : { label: replScopeLabel(scope, workspaceRoots), title: scope, prompt: path.basename(scope) };
+}
+
+export interface ReplScopeViewData {
+    /** Header text after "Scope: ". */
+    label: string;
+    /** Header tooltip: the full path. */
+    title: string;
+    /** Prompt of panel-originated entries, shown as `<prompt>> `. */
+    prompt: string;
+}
+
+export interface ReplScopeChoice {
+    label: string;
+    /** "session scope", or which of open / loaded the file is. */
+    description: string;
+    scope: ReplScope;
+    current: boolean;
+}
+
+/**
+ * Quick-pick items for Set REPL Scope: `__main__` first, then every file that is open or that
+ * the server has a scope for, once each, ordered by label then path. The current scope is
+ * always listed, even when it is neither open nor loaded any more.
+ */
+export function replScopeChoices(
+    openFiles: Iterable<string>,
+    loadedFiles: Iterable<string>,
+    current: ReplScope,
+    workspaceRoots: readonly string[],
+): ReplScopeChoice[] {
+    const open = new Set(openFiles);
+    const loaded = new Set(loadedFiles);
+    const files = new Set([...open, ...loaded]);
+    if (current !== undefined) files.add(current);
+    const fileChoices = [...files].map((file): ReplScopeChoice => ({
+        label: replScopeLabel(file, workspaceRoots),
+        description: [open.has(file) ? 'open' : '', loaded.has(file) ? 'loaded' : ''].filter(Boolean).join(', '),
+        scope: file,
+        current: file === current,
+    }));
+    const cmp = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0);
+    fileChoices.sort((a, b) => cmp(a.label, b.label) || cmp(a.scope as string, b.scope as string));
+    return [
+        { label: MAIN_SCOPE_LABEL, description: 'session scope', scope: undefined, current: current === undefined },
+        ...fileChoices,
+    ];
+}
+
+/**
+ * The panel's scope, and the files the connected server has a scope for as far as this
+ * extension has seen: every request naming a file (eval/complete/macroexpand `file`, panel
+ * `ns`, load-file `path`) creates that file's scope on the server, even when it then fails.
+ */
+export class ReplScopeState {
+    current: ReplScope = undefined;
+    private readonly loadedFiles = new Set<string>();
+
+    get loaded(): ReadonlySet<string> {
+        return this.loadedFiles;
+    }
+
+    /** Record the scope `msg` created; call once the server has answered it. */
+    noteAnswered(msg: Record<string, unknown>): void {
+        const field = msg.op === 'load-file' ? 'path' : (typeof msg.file === 'string' ? 'file' : NREPL_NS_FIELD);
+        const file = msg[field];
+        if (typeof file === 'string') this.loadedFiles.add(file);
+    }
+
+    /** A new connection is a new server with no file scopes; the panel's scope is created again on demand. */
+    connectionReset(): void {
+        this.loadedFiles.clear();
+    }
+}
+
+/**
  * Send one newline-delimited JSON request on `sock` and resolve with its reply (the
  * echoed `id` stripped). Requests may overlap: the socket's single reader routes each
  * reply to its request. Rejects if the socket errors or closes first (e.g. the server
@@ -544,6 +668,29 @@ export function linkifyErrors(text: string): string {
 }
 
 /**
+ * Start of the symbol that ends at `caret` in `text`: the walk back stops at whitespace, a
+ * bracket, a quote or a comment char. The one boundary rule for editor and panel completion.
+ */
+export function symbolPrefixStart(text: string, caret: number): number {
+    let start = caret;
+    while (start > 0 && !/[\s()[\]{}'`,;"]/.test(text[start - 1])) start--;
+    return start;
+}
+
+/** Longest common prefix of `items` ('' for none). */
+export function longestCommonPrefix(items: readonly string[]): string {
+    if (items.length === 0) return '';
+    let prefix = items[0];
+    for (const item of items) {
+        let n = 0;
+        while (n < prefix.length && n < item.length && prefix[n] === item[n]) n++;
+        prefix = prefix.slice(0, n);
+    }
+    // Never end inside a surrogate pair.
+    return /[\uD800-\uDBFF]$/.test(prefix) ? prefix.slice(0, -1) : prefix;
+}
+
+/**
  * VS Code notifications render `[label](command:...)` as clickable links, and its
  * linkedText parser has no escape syntax, so adjacency is broken instead: a
  * zero-width space between `]` and `(` keeps the link regex from matching.
@@ -619,18 +766,62 @@ export function makeNonce(): string {
     return crypto.randomBytes(16).toString('base64');
 }
 
-export function getReplHtml(nonce: string, cspSource: string): string {
+/** `value` as a JS expression safe inside an inline <script> (no `</script>` or `<!--`). */
+function scriptLiteral(value: unknown): string {
+    return JSON.stringify(value).replace(/</g, '\\u003c');
+}
+
+/**
+ * The REPL panel: a scope header (click: Set REPL Scope), the entries, and an input line.
+ * Webview → extension messages: `eval {code}`, `complete {prefix, requestId}`, `pickScope`,
+ * `openFile {file, line}`. Extension → webview: `eval {code, result, prompt?}` (prompt
+ * defaults to `repl`), `clear` (entries only), `scope {label, title}`,
+ * `completions {requestId, items}`.
+ */
+export function getReplHtml(
+    nonce: string,
+    cspSource: string,
+    scope: ReplScopeViewData = replScopeView(undefined, []),
+): string {
     return `<!DOCTYPE html>
 <html>
 <head>
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${cspSource} 'nonce-${nonce}'; script-src 'nonce-${nonce}';">
 <style nonce="${nonce}">
+  html, body { height: 100%; }
   body {
     font-family: var(--vscode-editor-font-family, monospace);
     font-size: var(--vscode-editor-font-size, 13px);
-    padding: 8px;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
     color: var(--vscode-editor-foreground);
     background: var(--vscode-editor-background);
+  }
+  #scope-bar {
+    position: sticky; top: 0; flex: none; padding: 4px 8px;
+    border-bottom: 1px solid var(--vscode-editorGroup-border);
+    background: var(--vscode-editor-background);
+  }
+  #scope {
+    background: none; border: none; padding: 0; margin: 0; font: inherit; cursor: pointer;
+    color: var(--vscode-descriptionForeground); text-align: left; max-width: 100%;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  #scope:hover { color: var(--vscode-textLink-foreground); }
+  #scope:focus-visible { outline: 1px solid var(--vscode-focusBorder); }
+  #entries { flex: 1 1 auto; overflow-y: auto; padding: 8px; }
+  #input-bar { flex: none; padding: 4px 8px 8px; border-top: 1px solid var(--vscode-editorGroup-border); }
+  #input {
+    display: block; width: 100%; box-sizing: border-box; resize: none; font: inherit; padding: 4px;
+    color: var(--vscode-input-foreground); background: var(--vscode-input-background);
+    border: 1px solid var(--vscode-input-border, transparent);
+  }
+  #input:focus { outline: 1px solid var(--vscode-focusBorder); outline-offset: -1px; }
+  #candidates {
+    color: var(--vscode-descriptionForeground); white-space: pre-wrap; padding-top: 2px;
+    max-height: 6em; overflow-y: auto;
   }
   .entry { margin-bottom: 12px; border-bottom: 1px solid var(--vscode-editorGroup-border); padding-bottom: 8px; }
   .code { color: var(--vscode-textPreformat-foreground); white-space: pre-wrap; }
@@ -640,22 +831,143 @@ export function getReplHtml(nonce: string, cspSource: string): string {
   .error { color: var(--vscode-errorForeground); white-space: pre-wrap; }
   .file-link { color: var(--vscode-textLink-foreground); cursor: pointer; text-decoration: underline; }
   .file-link:hover { color: var(--vscode-textLink-activeForeground); }
-  #entries { overflow-y: auto; }
 </style>
 </head>
 <body>
+<div id="scope-bar"><button id="scope" type="button"></button></div>
 <div id="entries"></div>
+<div id="input-bar">
+<textarea id="input" rows="1" spellcheck="false" aria-label="Evaluate in the REPL scope"></textarea>
+<div id="candidates" hidden></div>
+</div>
 <script nonce="${nonce}">
-  const entries = document.getElementById('entries');
   const vscode = acquireVsCodeApi();
+  const entries = document.getElementById('entries');
+  const scopeButton = document.getElementById('scope');
+  const input = document.getElementById('input');
+  const candidatesLine = document.getElementById('candidates');
+  const MAX_HISTORY = 100;
+  const MAX_CANDIDATES_SHOWN = 50;
+  const inputHistory = [];
+  // inputHistory.length while editing a fresh line; historyDraft keeps that line.
+  let historyIndex = 0;
+  let historyDraft = '';
+  let completionSeq = 0;
+  let pendingCompletion = null;
+
+  function renderScope(view) {
+    scopeButton.textContent = 'Scope: ' + String(view.label);
+    scopeButton.title = String(view.title);
+  }
+
+  function fitInput() {
+    input.style.height = 'auto';
+    input.style.height = Math.min(input.scrollHeight + 2, 200) + 'px';
+  }
+
+  function setInput(text, caret) {
+    input.value = text;
+    input.setSelectionRange(caret, caret);
+    fitInput();
+  }
+
+  function showCandidates(items) {
+    const shown = items.slice(0, MAX_CANDIDATES_SHOWN).join('  ');
+    candidatesLine.textContent = items.length > MAX_CANDIDATES_SHOWN ? shown + '  …' : shown;
+    candidatesLine.hidden = items.length === 0;
+  }
+
+  function submitInput() {
+    const code = input.value;
+    if (code.trim() === '') return;
+    vscode.postMessage({ type: 'eval', code: code });
+    if (inputHistory[inputHistory.length - 1] !== code) inputHistory.push(code);
+    if (inputHistory.length > MAX_HISTORY) inputHistory.shift();
+    historyIndex = inputHistory.length;
+    historyDraft = '';
+    pendingCompletion = null;
+    showCandidates([]);
+    setInput('', 0);
+  }
+
+  function recallHistory(step) {
+    const next = historyIndex + step;
+    if (next < 0 || next > inputHistory.length) return false;
+    if (historyIndex === inputHistory.length) historyDraft = input.value;
+    historyIndex = next;
+    const text = next === inputHistory.length ? historyDraft : inputHistory[next];
+    setInput(text, text.length);
+    return true;
+  }
+
+  function requestCompletion() {
+    const caret = input.selectionStart;
+    if (caret !== input.selectionEnd) return false;
+    const start = symbolPrefixStart(input.value, caret);
+    const prefix = input.value.slice(start, caret);
+    if (prefix === '') return false;
+    completionSeq += 1;
+    pendingCompletion = { requestId: completionSeq, start: start, caret: caret, value: input.value, prefix: prefix };
+    vscode.postMessage({ type: 'complete', prefix: prefix, requestId: completionSeq });
+    return true;
+  }
+
+  function applyCompletions(requestId, items) {
+    const pending = pendingCompletion;
+    if (pending === null || pending.requestId !== requestId) return;
+    pendingCompletion = null;
+    // Edited since the request: the answer is for text that is gone.
+    if (input.value !== pending.value || input.selectionStart !== pending.caret) return;
+    const names = Array.isArray(items) ? items.filter((s) => typeof s === 'string') : [];
+    const replaceWith = (text) => setInput(
+      pending.value.slice(0, pending.start) + text + pending.value.slice(pending.caret),
+      pending.start + text.length);
+    if (names.length === 1) {
+      replaceWith(names[0]);
+      showCandidates([]);
+      return;
+    }
+    const common = longestCommonPrefix(names);
+    if (common.length > pending.prefix.length && common.startsWith(pending.prefix)) replaceWith(common);
+    showCandidates(names);
+  }
+
+  input.addEventListener('keydown', (e) => {
+    if (e.isComposing) return;
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      submitInput();
+    } else if (e.key === 'Tab' && !e.shiftKey) {
+      if (requestCompletion()) e.preventDefault();
+    } else if (e.key === 'ArrowUp' && !input.value.slice(0, input.selectionStart).includes('\\n')) {
+      if (recallHistory(-1)) e.preventDefault();
+    } else if (e.key === 'ArrowDown' && !input.value.slice(input.selectionEnd).includes('\\n')) {
+      if (recallHistory(1)) e.preventDefault();
+    }
+  });
+
+  input.addEventListener('input', () => {
+    pendingCompletion = null;
+    showCandidates([]);
+    fitInput();
+  });
+
+  scopeButton.addEventListener('click', () => vscode.postMessage({ type: 'pickScope' }));
+
+  window.addEventListener('focus', () => input.focus());
+
   window.addEventListener('message', (e) => {
-    const { type, code, result } = e.data;
-    if (type === 'clear') { entries.innerHTML = ''; return; }
-    if (type !== 'eval') return;
+    const msg = e.data;
+    if (msg.type === 'clear') { entries.innerHTML = ''; return; }
+    if (msg.type === 'scope') { renderScope(msg); return; }
+    if (msg.type === 'completions') { applyCompletions(msg.requestId, msg.items); return; }
+    if (msg.type !== 'eval') return;
+    const { code, result } = msg;
+    const prompt = typeof msg.prompt === 'string' ? msg.prompt : 'repl';
     const div = document.createElement('div');
     div.className = 'entry';
 
-    let html = '<span class="prompt">repl&gt; </span><span class="code">' + escapeHtml(code) + '</span>';
+    let html = '<span class="prompt">' + escapeHtml(prompt) + '&gt; </span><span class="code">' + escapeHtml(code) + '</span>';
 
     if (result.stdout) {
       html += '<br><span class="stdout">' + escapeHtml(result.stdout.replace(/\\n$/, '')) + '</span>';
@@ -675,12 +987,21 @@ export function getReplHtml(nonce: string, cspSource: string): string {
 
   ${injectWebviewFunction(linkifyErrors, 'linkifyErrors')}
 
+  ${injectWebviewFunction(symbolPrefixStart, 'symbolPrefixStart')}
+
+  ${injectWebviewFunction(longestCommonPrefix, 'longestCommonPrefix')}
+
   document.addEventListener('click', (e) => {
     const link = e.target.closest('.file-link');
     if (link) {
       vscode.postMessage({ type: 'openFile', file: link.dataset.file, line: parseInt(link.dataset.line, 10) });
+      return;
     }
+    // A click in the entries focuses the input, unless it ended a text selection there.
+    if (entries.contains(e.target) && String(window.getSelection()) === '') input.focus();
   });
+
+  renderScope(${scriptLiteral({ label: scope.label, title: scope.title })});
 </script>
 </body>
 </html>`;

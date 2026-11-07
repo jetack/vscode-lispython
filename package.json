@@ -76,6 +76,10 @@
       {
         "command": "lispython.macroexpand",
         "title": "LisPython: Macroexpand Form at Cursor"
+      },
+      {
+        "command": "lispython.setReplScope",
+        "title": "LisPython: Set REPL Scope"
       }
     ],
     "menus": {
