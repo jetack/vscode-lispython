@@ -32,6 +32,61 @@ export function completionKindName(
         : FALLBACK_COMPLETION_KIND;
 }
 
+// LSP CompletionItemKind is 1-based, VS Code's enum is 0-based: LSP n is VS Code value n-1,
+// so this table is indexed by `kind - 1`.
+const LSP_COMPLETION_KIND_NAMES = [
+    'Text', 'Method', 'Function', 'Constructor', 'Field', 'Variable', 'Class', 'Interface',
+    'Module', 'Property', 'Unit', 'Value', 'Enum', 'Keyword', 'Snippet', 'Color', 'File',
+    'Reference', 'Folder', 'EnumMember', 'Constant', 'Struct', 'Event', 'Operator',
+    'TypeParameter',
+] as const satisfies readonly (keyof typeof CompletionItemKind)[];
+
+export function lspCompletionKindName(kind: unknown): keyof typeof CompletionItemKind {
+    if (typeof kind !== 'number' || !Number.isInteger(kind)
+        || kind < 1 || kind > LSP_COMPLETION_KIND_NAMES.length) {
+        return FALLBACK_COMPLETION_KIND;
+    }
+    return LSP_COMPLETION_KIND_NAMES[kind - 1];
+}
+
+export type NreplCompletionItem = {
+    label: string;
+    kind: keyof typeof CompletionItemKind;
+    description?: string;
+};
+
+/** Completion items of a `complete` response: LSP-shaped `items`, else the legacy fields. */
+export function nreplCompletionItems(result: Record<string, unknown>): NreplCompletionItem[] {
+    if (Array.isArray(result.items)) {
+        const out: NreplCompletionItem[] = [];
+        for (const raw of result.items as unknown[]) {
+            if (typeof raw !== 'object' || raw === null) continue;
+            const entry = raw as Record<string, unknown>;
+            if (typeof entry.label !== 'string') continue;
+            const item: NreplCompletionItem = {
+                label: entry.label,
+                kind: lspCompletionKindName(entry.kind),
+            };
+            const details = entry.labelDetails;
+            if (typeof details === 'object' && details !== null) {
+                const description = (details as Record<string, unknown>).description;
+                if (typeof description === 'string') item.description = description;
+            }
+            out.push(item);
+        }
+        return out;
+    }
+    // Transitional: the completions/kinds fields are removed by a cleanup card once `items` is universal.
+    if (Array.isArray(result.completions)) {
+        const kinds = typeof result.kinds === 'object' && result.kinds !== null
+            ? result.kinds as Record<string, string> : undefined;
+        return result.completions
+            .filter((c: unknown): c is string => typeof c === 'string')
+            .map((label) => ({ label, kind: completionKindName(kinds, label) }));
+    }
+    return [];
+}
+
 /** The server writes bare decimal digits, no newline. */
 export function parsePortFile(text: string): number | undefined {
     const t = text.trim();
