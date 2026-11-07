@@ -54,6 +54,21 @@ export function nreplCompletionItems(result: Record<string, unknown>): NreplComp
     return out;
 }
 
+/**
+ * The one merge rule for the LSP and nREPL completion lists: on an exact label
+ * clash the LSP item wins, so only the nREPL items the LSP did not offer
+ * (runtime names) are returned, in nREPL order. It is client-side because only
+ * the client holds both answers; the nREPL cannot know what the LSP resolved.
+ */
+export function runtimeOnlyItems(
+    lspLabels: Iterable<string | { label: string }>,
+    nreplItems: NreplCompletionItem[],
+): NreplCompletionItem[] {
+    const seen = new Set<string>();
+    for (const l of lspLabels) seen.add(typeof l === 'string' ? l : l.label);
+    return nreplItems.filter((item) => !seen.has(item.label));
+}
+
 /** The server writes bare decimal digits, no newline. */
 export function parsePortFile(text: string): number | undefined {
     const t = text.trim();

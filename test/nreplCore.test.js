@@ -1314,3 +1314,15 @@ test('nreplCompletionItems reads only items', () => {
         core.nreplCompletionItems({ completions: ['A', 'f'], kinds: { A: 'class', f: 'macro' } }), []);
     assert.deepStrictEqual(core.nreplCompletionItems({}), []);
 });
+
+test('runtimeOnlyItems: LSP wins a clash, nREPL-only names pass through in order', () => {
+    const nrepl = [
+        { label: 'def', kind: 'Keyword' },
+        { label: 'my_var', kind: 'Variable' },
+        { label: 'print', kind: 'Function' },
+        { label: 'zed', kind: 'Variable' },
+    ];
+    const out = core.runtimeOnlyItems(['def', { label: 'print' }], nrepl);
+    assert.deepStrictEqual(out.map((i) => i.label), ['my_var', 'zed']);
+    assert.deepStrictEqual(core.runtimeOnlyItems([], nrepl), nrepl);
+});
