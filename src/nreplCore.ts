@@ -7,30 +7,7 @@ import * as crypto from 'crypto';
 import * as net from 'net';
 import { spawn, ChildProcess } from 'child_process';
 
-// Mirrors lpy-mode's kind table; vscode has no macro kind, so macros read as functions.
-export const COMPLETION_KINDS: Record<string, keyof typeof CompletionItemKind> = {
-    class: 'Class',
-    function: 'Function',
-    variable: 'Variable',
-    macro: 'Function',
-    keyword: 'Keyword',
-};
-
 export const FALLBACK_COMPLETION_KIND: keyof typeof CompletionItemKind = 'Function';
-
-function own(obj: object, key: string): boolean {
-    return Object.prototype.hasOwnProperty.call(obj, key);
-}
-
-export function completionKindName(
-    kinds: Record<string, string> | undefined,
-    completion: string,
-): keyof typeof CompletionItemKind {
-    const kind = kinds && own(kinds, completion) ? kinds[completion] : undefined;
-    return kind !== undefined && own(COMPLETION_KINDS, kind)
-        ? COMPLETION_KINDS[kind]
-        : FALLBACK_COMPLETION_KIND;
-}
 
 // LSP CompletionItemKind is 1-based, VS Code's enum is 0-based: LSP n is VS Code value n-1,
 // so this table is indexed by `kind - 1`.
@@ -55,36 +32,26 @@ export type NreplCompletionItem = {
     description?: string;
 };
 
-/** Completion items of a `complete` response: LSP-shaped `items`, else the legacy fields. */
+/** Completion items of a `complete` response: the LSP-shaped `items` field only. */
 export function nreplCompletionItems(result: Record<string, unknown>): NreplCompletionItem[] {
-    if (Array.isArray(result.items)) {
-        const out: NreplCompletionItem[] = [];
-        for (const raw of result.items as unknown[]) {
-            if (typeof raw !== 'object' || raw === null) continue;
-            const entry = raw as Record<string, unknown>;
-            if (typeof entry.label !== 'string') continue;
-            const item: NreplCompletionItem = {
-                label: entry.label,
-                kind: lspCompletionKindName(entry.kind),
-            };
-            const details = entry.labelDetails;
-            if (typeof details === 'object' && details !== null) {
-                const description = (details as Record<string, unknown>).description;
-                if (typeof description === 'string' && description !== '') item.description = description;
-            }
-            out.push(item);
+    if (!Array.isArray(result.items)) return [];
+    const out: NreplCompletionItem[] = [];
+    for (const raw of result.items as unknown[]) {
+        if (typeof raw !== 'object' || raw === null) continue;
+        const entry = raw as Record<string, unknown>;
+        if (typeof entry.label !== 'string') continue;
+        const item: NreplCompletionItem = {
+            label: entry.label,
+            kind: lspCompletionKindName(entry.kind),
+        };
+        const details = entry.labelDetails;
+        if (typeof details === 'object' && details !== null) {
+            const description = (details as Record<string, unknown>).description;
+            if (typeof description === 'string' && description !== '') item.description = description;
         }
-        return out;
+        out.push(item);
     }
-    // Transitional: the completions/kinds fields are removed by a cleanup card once `items` is universal.
-    if (Array.isArray(result.completions)) {
-        const kinds = typeof result.kinds === 'object' && result.kinds !== null
-            ? result.kinds as Record<string, string> : undefined;
-        return result.completions
-            .filter((c: unknown): c is string => typeof c === 'string')
-            .map((label) => ({ label, kind: completionKindName(kinds, label) }));
-    }
-    return [];
+    return out;
 }
 
 /** The server writes bare decimal digits, no newline. */
