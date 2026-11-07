@@ -13,7 +13,8 @@ import {
     chooseNreplHome, completionKindName, findNreplPortFor, getReplHtml, makeNonce, NREPL_PORT_FILE,
     NreplConnectCancelled, checkServerIdEcho, NreplConnection, evalMessage, completeMessage, macroexpandMessage, nreplRequestOn, openFileRefusedMessage, openFileWarning, resolveActiveFile,
     resolveOpenableFile, nreplFileOf,
-    NreplServerSupervisor,
+    NreplServerSupervisor, panelCompleteMessage, panelEvalMessage, ReplScopeState, replScopeChoices,
+    replScopeView, symbolPrefixStart,
 } from './nreplCore';
 
 let client: LanguageClient | undefined;
@@ -573,7 +574,11 @@ function flashRange(editor: vscode.TextEditor, range: [number, number]): void {
 // nREPL client
 // ---------------------------------------------------------------------------
 
-const nreplConn = new NreplConnection((connected) => updateNreplStatus(connected));
+const replScope = new ReplScopeState();
+const nreplConn = new NreplConnection((connected) => {
+    if (connected) replScope.connectionReset();
+    updateNreplStatus(connected);
+});
 const nreplServer = new NreplServerSupervisor();
 let nreplOutputChannel: vscode.OutputChannel | undefined;
 let nreplStatusItem: vscode.StatusBarItem | undefined;
@@ -605,13 +610,26 @@ function getOrCreateReplPanel(): vscode.WebviewPanel {
         { viewColumn: vscode.ViewColumn.Two, preserveFocus: true },
         { enableScripts: true, retainContextWhenHidden: true },
     );
-    nreplPanel.webview.html = getReplHtml(makeNonce(), nreplPanel.webview.cspSource);
+    nreplPanel.webview.html = getReplHtml(
+        makeNonce(), nreplPanel.webview.cspSource, replScopeView(replScope.current, workspaceFileRoots()));
+    const panel = nreplPanel;
+    // Webview messages are untrusted input: every field is type-checked before use.
     nreplPanel.webview.onDidReceiveMessage(async (msg) => {
+        if (msg?.type === 'eval' && typeof msg.code === 'string' && msg.code.trim() !== '') {
+            await evalFromPanel(msg.code);
+            return;
+        }
+        if (msg?.type === 'complete' && typeof msg.prefix === 'string' && msg.prefix !== '' && Number.isSafeInteger(msg.requestId)) {
+            const items = await completeFromPanel(msg.prefix);
+            if (nreplPanel === panel) panel.webview.postMessage({ type: 'completions', requestId: msg.requestId, items });
+            return;
+        }
+        if (msg?.type === 'pickScope') {
+            await setReplScope();
+            return;
+        }
         if (msg?.type === 'openFile' && typeof msg.file === 'string' && msg.file.length > 0 && Number.isInteger(msg.line) && msg.line > 0) {
-            const roots = (vscode.workspace.workspaceFolders ?? [])
-                .filter((f) => f.uri.scheme === 'file')
-                .map((f) => f.uri.fsPath);
-            const resolved = resolveOpenableFile(msg.file, roots);
+            const resolved = resolveOpenableFile(msg.file, workspaceFileRoots());
             if (!resolved) {
                 vscode.window.setStatusBarMessage(openFileRefusedMessage(msg.file), 5000);
                 return;
@@ -633,9 +651,96 @@ function getOrCreateReplPanel(): vscode.WebviewPanel {
     return nreplPanel;
 }
 
-function appendToReplPanel(code: string, result: { value?: string | null; stdout?: string; error?: string | null }): void {
+/** Local workspace folder paths. */
+function workspaceFileRoots(): string[] {
+    return (vscode.workspace.workspaceFolders ?? [])
+        .filter((f) => f.uri.scheme === 'file')
+        .map((f) => f.uri.fsPath);
+}
+
+/** `prompt` names the scope of a panel-typed entry; editor-originated entries leave it out and show `repl`. */
+function appendToReplPanel(
+    code: string,
+    result: { value?: string | null; stdout?: string; error?: string | null },
+    prompt?: string,
+): void {
     const panel = getOrCreateReplPanel();
-    panel.webview.postMessage({ type: 'eval', code, result });
+    panel.webview.postMessage(prompt === undefined ? { type: 'eval', code, result } : { type: 'eval', code, result, prompt });
+}
+
+function postReplScope(): void {
+    if (!nreplPanel) return;
+    const { label, title } = replScopeView(replScope.current, workspaceFileRoots());
+    nreplPanel.webview.postMessage({ type: 'scope', label, title });
+}
+
+/** Evaluate code typed into the panel in the panel's scope; auto-starts the nREPL like the editor commands. */
+async function evalFromPanel(code: string): Promise<void> {
+    const scope = replScope.current;
+    const { prompt } = replScopeView(scope, workspaceFileRoots());
+    if (!nreplConnected()) {
+        await startNrepl();
+    }
+    if (!nreplConnected()) {
+        appendToReplPanel(code, { error: 'Could not connect to nREPL.' }, prompt);
+        vscode.window.showErrorMessage('Could not connect to nREPL.');
+        return;
+    }
+    try {
+        const result = await nreplRequest(panelEvalMessage(code, scope));
+        appendToReplPanel(code, { value: result.value, stdout: result.stdout, error: result.error }, prompt);
+    } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        appendToReplPanel(code, { error: `nREPL eval failed: ${msg}` }, prompt);
+    }
+}
+
+/** Completions for the panel input; never starts a server, and any failure is no completions. */
+async function completeFromPanel(prefix: string): Promise<string[]> {
+    if (!nreplConnected()) return [];
+    try {
+        const result = await nreplRequest(panelCompleteMessage(prefix, replScope.current));
+        return Array.isArray(result.completions)
+            ? result.completions.filter((c: unknown): c is string => typeof c === 'string')
+            : [];
+    } catch {
+        return [];
+    }
+}
+
+async function setReplScope(): Promise<void> {
+    const roots = workspaceFileRoots();
+    const open = vscode.workspace.textDocuments
+        .filter((d) => d.languageId === 'lispython')
+        .map((d) => nreplFileOf(d))
+        .filter((f): f is string => f !== undefined);
+    const choices = replScopeChoices(open, replScope.scoped, replScope.current, roots);
+    // Labels render $(codicon) syntax; a file name is not markup.
+    const items = choices.map((c) => ({
+        label: (c.current ? '$(check) ' : '') + c.label.replace(/\$\(/g, '$​('),
+        description: c.description,
+        detail: c.scope !== undefined && c.label !== c.scope ? c.scope : undefined,
+        choice: c,
+    }));
+    const picked = await vscode.window.showQuickPick(items, {
+        placeHolder: 'Scope the REPL panel evaluates and completes in',
+        matchOnDescription: true,
+        matchOnDetail: true,
+    });
+    if (!picked) return;
+    replScope.current = picked.choice.scope;
+    postReplScope();
+    showReplPanel();
+}
+
+/**
+ * Open the REPL panel if needed and reveal it with the input focused: the user asked for it.
+ * Editor evals use getOrCreateReplPanel alone, which keeps focus in the editor.
+ */
+function showReplPanel(): void {
+    const panel = getOrCreateReplPanel();
+    panel.reveal(panel.viewColumn ?? vscode.ViewColumn.Two, false);
+    panel.webview.postMessage({ type: 'focusInput' });
 }
 
 function updateNreplStatus(connected: boolean): void {
@@ -775,7 +880,11 @@ function nreplEval(code: string, doc: vscode.TextDocument, range: [number, numbe
 function nreplRequest(msg: Record<string, unknown>): Promise<any> {
     const sock = nreplConn.socket;
     if (!sock) return Promise.reject(new Error('nREPL not connected'));
-    return nreplRequestOn(sock, msg);
+    return nreplRequestOn(sock, msg).then((reply) => {
+        // A reply from a replaced connection says nothing about the current server's scopes.
+        if (nreplConn.socket === sock) replScope.noteAnswered(msg);
+        return reply;
+    });
 }
 
 async function evalAndShow(code: string, editor: vscode.TextEditor, range: [number, number]): Promise<void> {
@@ -930,12 +1039,7 @@ class NreplCompletionProvider implements vscode.CompletionItemProvider {
 
         // Extract the prefix: walk backwards from cursor over symbol characters
         const lineText = document.lineAt(position.line).text;
-        let start = position.character;
-        while (start > 0) {
-            const ch = lineText[start - 1];
-            if (/[\s()[\]{}'`,;"]/.test(ch)) break;
-            start--;
-        }
+        const start = symbolPrefixStart(lineText, position.character);
         const prefix = lineText.slice(start, position.character);
         if (!prefix) return undefined;
 
@@ -1096,6 +1200,8 @@ export async function activate(context: vscode.ExtensionContext) {
         vscode.commands.registerCommand('lispython.disconnectNrepl', disconnectNrepl),
         vscode.commands.registerCommand('lispython.loadFileToRepl', loadFileToRepl),
         vscode.commands.registerCommand('lispython.macroexpand', macroexpand),
+        vscode.commands.registerCommand('lispython.setReplScope', setReplScope),
+        vscode.commands.registerCommand('lispython.showRepl', showReplPanel),
     );
 
     // Completion provider (nREPL-backed)

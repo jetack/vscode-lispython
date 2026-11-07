@@ -194,32 +194,168 @@ test('getReplHtml carries a nonce-based CSP on every script and style tag', () =
     assert.notStrictEqual(core.makeNonce(), core.makeNonce());
 });
 
-test('injected escapeHtml/linkifyErrors work inside the webview script', () => {
+// The webview script is assembled from function source text, and the shipped `main` is a
+// minified bundle that renames those functions, so every webview test runs on both builds.
+const coreBundlePath = process.env.LISPY_CORE_BUNDLE
+    ? path.resolve(process.cwd(), process.env.LISPY_CORE_BUNDLE)
+    : undefined;
+const webviewBuilds = [['tsc', () => core], ['minified bundle', () => {
+    if (coreBundlePath === undefined) return undefined;
+    return require(coreBundlePath);
+}]];
+
+function webviewTest(name, fn) {
+    for (const [build, load] of webviewBuilds) {
+        test(`${name} [${build}]`, (t) => {
+            const c = load();
+            if (c === undefined) return t.skip('LISPY_CORE_BUNDLE not set; run `bun run test`');
+            return fn(c, t);
+        });
+    }
+}
+
+// A minimal DOM for the REPL webview script: just the members the script touches.
+function makeElement() {
+    const listeners = {};
+    return {
+        listeners, value: '', innerHTML: '', textContent: '', title: '', hidden: false,
+        style: {}, scrollHeight: 0, selectionStart: 0, selectionEnd: 0, children: [],
+        addEventListener(type, fn) { (listeners[type] ??= []).push(fn); },
+        setSelectionRange(a, b) { this.selectionStart = a; this.selectionEnd = b; },
+        appendChild(child) { this.children.push(child); },
+        contains: () => false,
+        focused: false,
+        focus() { this.focused = true; },
+        scrollIntoView() {},
+    };
+}
+
+/** Run the REPL webview script of `core` in node:vm and hand back its DOM and posted messages. */
+function loadReplWebview(core, scopeView) {
     const vm = require('node:vm');
-    const html = core.getReplHtml('n', 'c');
+    const html = core.getReplHtml('n', 'c', scopeView);
     const script = /<script nonce="n">([\s\S]*?)<\/script>/.exec(html)[1];
-    let listener;
-    const entries = { innerHTML: '', appendChild() {} };
+    const els = {};
+    const posted = [];
+    const windowListeners = {};
     const ctx = {
         document: {
-            getElementById: () => entries,
+            getElementById: (id) => (els[id] ??= makeElement()),
             addEventListener() {},
-            createElement: () => ({ scrollIntoView() {} }),
+            createElement: () => makeElement(),
         },
-        window: { addEventListener: (type, fn) => { if (type === 'message') listener = fn; } },
-        acquireVsCodeApi: () => ({ postMessage() {} }),
+        window: {
+            addEventListener: (type, fn) => { (windowListeners[type] ??= []).push(fn); },
+            getSelection: () => '',
+        },
+        // JSON round-trip: objects built in the vm realm fail deepStrictEqual on their prototype.
+        acquireVsCodeApi: () => ({ postMessage: (m) => posted.push(JSON.parse(JSON.stringify(m))) }),
     };
     vm.createContext(ctx);
     vm.runInContext(script, ctx);
-    const src = 'File "/a.py", line 3';
-    assert.strictEqual(vm.runInContext(`linkifyErrors(${JSON.stringify(src)})`, ctx), core.linkifyErrors(src));
-    assert.strictEqual(vm.runInContext(`escapeHtml('<b>')`, ctx), '&lt;b&gt;');
+    const input = els.input;
+    return {
+        ctx, els, input, posted,
+        send: (data) => windowListeners.message.forEach((fn) => fn({ data })),
+        type(text, caret = text.length) {
+            input.value = text;
+            input.selectionStart = input.selectionEnd = caret;
+            (input.listeners.input ?? []).forEach((fn) => fn({}));
+        },
+        key(key, extra = {}) {
+            const ev = { key, shiftKey: false, isComposing: false, defaultPrevented: false, ...extra };
+            ev.preventDefault = () => { ev.defaultPrevented = true; };
+            input.listeners.keydown.forEach((fn) => fn(ev));
+            return ev;
+        },
+    };
+}
 
-    let div;
-    ctx.document.createElement = () => (div = { scrollIntoView() {} });
-    listener({ data: { type: 'eval', code: '<b>', result: { error: src } } });
+webviewTest('injected escapeHtml/linkifyErrors work inside the webview script', (core) => {
+    const vm = require('node:vm');
+    const w = loadReplWebview(core);
+    const src = 'File "/a.py", line 3';
+    assert.strictEqual(vm.runInContext(`linkifyErrors(${JSON.stringify(src)})`, w.ctx), core.linkifyErrors(src));
+    assert.strictEqual(vm.runInContext(`escapeHtml('<b>')`, w.ctx), '&lt;b&gt;');
+
+    w.send({ type: 'eval', code: '<b>', result: { error: src } });
+    const div = w.els.entries.children.at(-1);
     assert.ok(div.innerHTML.includes('&lt;b&gt;'));
     assert.ok(div.innerHTML.includes('<span class="file-link" data-file="/a.py" data-line="3">'));
+    assert.ok(div.innerHTML.startsWith('<span class="prompt">repl&gt; </span>'), 'editor entries keep the repl prompt');
+    w.send({ type: 'eval', code: '1', result: { value: '1' }, prompt: '<i>.lpy' });
+    assert.ok(w.els.entries.children.at(-1).innerHTML.startsWith('<span class="prompt">&lt;i&gt;.lpy&gt; </span>'));
+});
+
+webviewTest('webview input: Enter posts eval, Shift+Enter and a blank input post nothing', (core) => {
+    const w = loadReplWebview(core);
+    w.type('(+ 1\n 2)');
+    const shift = w.key('Enter', { shiftKey: true });
+    assert.strictEqual(shift.defaultPrevented, false, 'Shift+Enter inserts the newline');
+    assert.deepStrictEqual(w.posted, []);
+    const enter = w.key('Enter');
+    assert.strictEqual(enter.defaultPrevented, true);
+    assert.deepStrictEqual(w.posted, [{ type: 'eval', code: '(+ 1\n 2)' }]);
+    assert.strictEqual(w.input.value, '');
+    w.type('  \n ');
+    w.key('Enter');
+    assert.strictEqual(w.posted.length, 1, 'blank input posts nothing');
+});
+
+webviewTest('webview: clear empties the entries only; scope messages set the header as text', (core) => {
+    const w = loadReplWebview(core, { label: 'src/</script><b>x.lpy', title: '/w/src/</script><b>x.lpy' });
+    assert.strictEqual(w.els.scope.textContent, 'Scope: src/</script><b>x.lpy', 'initial scope renders at once');
+    assert.strictEqual(w.els.scope.title, '/w/src/</script><b>x.lpy');
+    w.send({ type: 'eval', code: '1', result: { value: '1' } });
+    w.type('(draft');
+    w.send({ type: 'clear' });
+    assert.strictEqual(w.els.entries.innerHTML, '');
+    assert.strictEqual(w.input.value, '(draft');
+    w.send({ type: 'scope', label: '/a/<img src=x>.lpy', title: '/a/<img src=x>.lpy' });
+    assert.strictEqual(w.els.scope.textContent, 'Scope: /a/<img src=x>.lpy');
+    assert.ok(!w.els.scope.innerHTML.includes('<img'), w.els.scope.innerHTML);
+});
+
+webviewTest('webview: Tab completes the symbol before the caret', (core) => {
+    const w = loadReplWebview(core);
+    w.type('(foo-ba x)', 7);
+    const tab = w.key('Tab');
+    assert.strictEqual(tab.defaultPrevented, true);
+    const req = w.posted.at(-1);
+    assert.deepStrictEqual(req, { type: 'complete', prefix: 'foo-ba', requestId: req.requestId });
+    w.send({ type: 'completions', requestId: req.requestId, items: ['foo-bar'] });
+    assert.strictEqual(w.input.value, '(foo-bar x)');
+    assert.strictEqual(w.input.selectionStart, 8);
+
+    // Several: extend to the common prefix and list them; a stale reply changes nothing.
+    w.type('(pr');
+    w.key('Tab');
+    const stale = w.posted.at(-1).requestId;
+    w.key('Tab');
+    const fresh = w.posted.at(-1).requestId;
+    w.send({ type: 'completions', requestId: stale, items: ['zzz'] });
+    assert.strictEqual(w.input.value, '(pr');
+    w.send({ type: 'completions', requestId: fresh, items: ['print', 'printf'] });
+    assert.strictEqual(w.input.value, '(print');
+    assert.strictEqual(w.els.candidates.hidden, false);
+    assert.ok(w.els.candidates.textContent.includes('printf'));
+});
+
+webviewTest('webview: a completions reply is dropped when the caret moved since its request', (core) => {
+    const w = loadReplWebview(core);
+    w.type('(foo-ba x)', 7);
+    w.key('Tab');
+    const { requestId } = w.posted.at(-1);
+    // Moving the caret fires no input event, so only the reply-time check can catch it.
+    w.input.setSelectionRange(1, 1);
+    w.send({ type: 'completions', requestId, items: ['foo-bar'] });
+    assert.strictEqual(w.input.value, '(foo-ba x)');
+});
+
+webviewTest('webview: focusInput focuses the input', (core) => {
+    const w = loadReplWebview(core);
+    w.send({ type: 'focusInput' });
+    assert.strictEqual(w.input.focused, true);
 });
 
 test('findNreplPortFor: active file walks up its own root, else folders in order', (t) => {
@@ -1042,5 +1178,95 @@ test('completeMessage/macroexpandMessage use the eval file path, and none for un
     for (const d of [untitled, remote]) {
         assert.deepStrictEqual(core.completeMessage('ab', d), { op: 'complete', prefix: 'ab' });
         assert.deepStrictEqual(core.macroexpandMessage('(a)', d), { op: 'macroexpand', code: '(a)' });
+    }
+});
+
+test('panelEvalMessage/panelCompleteMessage: __main__ sends no ns key, a file scope sends ns only', () => {
+    const wire = (m) => JSON.parse(JSON.stringify(m));
+    const mainEval = core.panelEvalMessage('(a)', undefined);
+    const mainComplete = core.panelCompleteMessage('ab', undefined);
+    // An `ns: undefined` key is dropped by JSON but would be a null-valued field to other encoders.
+    assert.ok(!('ns' in mainEval) && !('ns' in mainComplete));
+    assert.deepStrictEqual(wire(mainEval), { op: 'eval', code: '(a)' });
+    assert.deepStrictEqual(wire(mainComplete), { op: 'complete', prefix: 'ab' });
+    // Never file/line/column: the panel's code is not file text, so the eval must stay <nrepl-N>.
+    assert.deepStrictEqual(wire(core.panelEvalMessage('(a)', '/w/f.lpy')), { op: 'eval', code: '(a)', ns: '/w/f.lpy' });
+    assert.deepStrictEqual(wire(core.panelCompleteMessage('ab', '/w/f.lpy')), { op: 'complete', prefix: 'ab', ns: '/w/f.lpy' });
+});
+
+test('replScopeLabel: __main__, relative inside the deepest workspace root, absolute outside', () => {
+    const roots = ['/w', '/w/pkg', '/other'];
+    assert.strictEqual(core.replScopeLabel(undefined, roots), '__main__');
+    assert.strictEqual(core.replScopeLabel('/w/src/foo.lpy', roots), path.join('src', 'foo.lpy'));
+    assert.strictEqual(core.replScopeLabel('/w/pkg/m.lpy', roots), 'm.lpy');
+    assert.strictEqual(core.replScopeLabel('/wx/foo.lpy', roots), '/wx/foo.lpy', 'a sibling with a shared name prefix is outside');
+    assert.strictEqual(core.replScopeLabel('/tmp/foo.lpy', []), '/tmp/foo.lpy');
+});
+
+test('replScopeChoices: __main__ first, open and in-nREPL merged, current flagged, sorted', () => {
+    const roots = ['/w'];
+    const view = (cs) => cs.map((c) => [c.label, c.description, c.scope, c.current]);
+    assert.deepStrictEqual(
+        view(core.replScopeChoices(['/w/b.lpy', '/w/a.lpy'], ['/w/b.lpy', '/x/c.lpy'], '/w/a.lpy', roots)),
+        [
+            ['__main__', 'session scope', undefined, false],
+            ['/x/c.lpy', 'in nREPL', '/x/c.lpy', false],
+            ['a.lpy', 'open', '/w/a.lpy', true],
+            ['b.lpy', 'open, in nREPL', '/w/b.lpy', false],
+        ]);
+    // The current scope stays listed after its file is closed; __main__ is current by default.
+    assert.deepStrictEqual(core.replScopeChoices([], [], '/w/gone.lpy', roots).map((c) => c.scope), [undefined, '/w/gone.lpy']);
+    assert.strictEqual(core.replScopeChoices([], [], undefined, roots)[0].current, true);
+});
+
+test('ReplScopeState: answered requests mark their file scoped; a new connection clears them, not the scope', () => {
+    const s = new core.ReplScopeState();
+    s.noteAnswered({ op: 'eval', code: '1', file: '/w/a.lpy', line: 1, column: 1 });
+    s.noteAnswered({ op: 'load-file', path: '/w/b.lpy' });
+    s.noteAnswered({ op: 'complete', prefix: 'x', ns: '/w/c.lpy' });
+    s.noteAnswered({ op: 'eval', code: '1' });
+    assert.deepStrictEqual([...s.scoped].sort(), ['/w/a.lpy', '/w/b.lpy', '/w/c.lpy']);
+    s.current = '/w/a.lpy';
+    s.connectionReset();
+    assert.deepStrictEqual([...s.scoped], []);
+    assert.strictEqual(s.current, '/w/a.lpy');
+});
+
+test('symbolPrefixStart stops at brackets, quotes and whitespace; longestCommonPrefix keeps code points whole', () => {
+    const text = '(foo [bar.baz-q "s';
+    const prefixAt = (caret) => text.slice(core.symbolPrefixStart(text, caret), caret);
+    assert.strictEqual(prefixAt(4), 'foo');
+    assert.strictEqual(prefixAt(15), 'bar.baz-q');
+    assert.strictEqual(prefixAt(18), 's');
+    assert.strictEqual(prefixAt(16), '');
+    assert.strictEqual(core.longestCommonPrefix(['a\u{1F600}', 'a\u{1F601}']), 'a');
+});
+
+/** lispython's tools.lpy: $LISPYTHON_DIR, else a `lispython` checkout beside the repo or any ancestor (worktrees nest). */
+function findLispythonTools() {
+    const rel = path.join('src', 'lispy', 'tools.lpy');
+    if (process.env.LISPYTHON_DIR) return path.join(process.env.LISPYTHON_DIR, rel);
+    let dir = path.resolve(__dirname, '..');
+    while (path.dirname(dir) !== dir) {
+        const candidate = path.join(path.dirname(dir), 'lispython', rel);
+        if (fs.existsSync(candidate)) return candidate;
+        dir = path.dirname(dir);
+    }
+    return undefined;
+}
+
+test('NREPL_NS_FIELD mirrors the field lispython reads for eval/complete/macroexpand scope', (t) => {
+    const tools = findLispythonTools();
+    if (tools === undefined || !fs.existsSync(tools)) return t.skip('lispython checkout not found; set LISPYTHON_DIR');
+    const src = fs.readFileSync(tools, 'utf8');
+    const ns = core.NREPL_NS_FIELD;
+    const def = /\(def _nrepl-request-scope [\s\S]*?(?=\n\(def )/.exec(src);
+    assert.ok(def, '_nrepl-request-scope not found');
+    assert.ok(def[0].includes(`(.get msg "${ns}")`), def[0]);
+    for (const op of ['eval', 'complete', 'macroexpand']) {
+        const at = src.indexOf(`(== op "${op}")`);
+        assert.ok(at >= 0, `dispatch for ${op} not found`);
+        const fields = /_nrepl-request-scope msg (\[[^\]]*\])/.exec(src.slice(at))[1];
+        assert.strictEqual(fields, `["file" "${ns}"]`, op);
     }
 });

@@ -4,10 +4,12 @@ import esbuild from "esbuild";
 const production = process.argv.includes("--production");
 const watch = process.argv.includes("--watch");
 const outfileArg = process.argv.find((a) => a.startsWith("--outfile="));
+// --entry= lets the tests build a module (nreplCore) with the exact production options.
+const entryArg = process.argv.find((a) => a.startsWith("--entry="));
 
 /** @type {import("esbuild").BuildOptions} */
 const options = {
-  entryPoints: ["src/extension.ts"],
+  entryPoints: [entryArg ? entryArg.slice("--entry=".length) : "src/extension.ts"],
   outfile: outfileArg ? outfileArg.slice("--outfile=".length) : "out/extension.js",
   bundle: true,
   platform: "node",
