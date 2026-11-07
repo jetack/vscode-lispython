@@ -12,7 +12,7 @@ import {
 import {
     chooseNreplHome, completionKindName, findNreplPortFor, getReplHtml, makeNonce, NREPL_PORT_FILE,
     NreplConnectCancelled, checkServerIdEcho, NreplConnection, evalMessage, completeMessage, macroexpandMessage, nreplRequestOn, openFileRefusedMessage, openFileWarning, resolveActiveFile,
-    resolveOpenableFile,
+    resolveOpenableFile, nreplFileOf,
     NreplServerSupervisor,
 } from './nreplCore';
 
@@ -841,7 +841,11 @@ async function loadFileToRepl(): Promise<void> {
         await editor.document.save();
     }
 
-    const filePath = editor.document.uri.fsPath;
+    const filePath = nreplFileOf(editor.document);
+    if (!filePath) {
+        vscode.window.showErrorMessage('Save the file to disk before loading it into the nREPL.');
+        return;
+    }
 
     // Auto-start nREPL if not connected
     if (!nreplConnected()) {

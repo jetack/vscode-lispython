@@ -284,9 +284,9 @@ type NreplDocId = { uri: { fsPath: string; scheme: string }; isUntitled: boolean
 
 /**
  * The file path the nREPL server knows `doc` by, or undefined when it has none (untitled or
- * non-`file` scheme). The server keys each file's scope by its normalised path, so eval, complete
- * and macroexpand must all take the path from here: another spelling would split one file into
- * two scopes. Contract: lispython src/lispy/tools.lpy `_nrepl-dispatch`.
+ * non-`file` scheme). The server keys each file's scope by its normalised path, so eval, complete,
+ * macroexpand and load-file must all take the path from here: another spelling would split one
+ * file into two scopes. Contract: lispython src/lispy/tools.lpy `_nrepl-dispatch`.
  */
 export function nreplFileOf(doc: NreplDocId): string | undefined {
     return doc.isUntitled || doc.uri.scheme !== 'file' ? undefined : doc.uri.fsPath;
