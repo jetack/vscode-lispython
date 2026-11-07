@@ -1259,14 +1259,20 @@ test('NREPL_NS_FIELD mirrors the field lispython reads for eval/complete/macroex
     const tools = findLispythonTools();
     if (tools === undefined || !fs.existsSync(tools)) return t.skip('lispython checkout not found; set LISPYTHON_DIR');
     const src = fs.readFileSync(tools, 'utf8');
-    const ns = core.NREPL_NS_FIELD;
+    // tools.lpy spells the field once, as NREPL-NS-FIELD; its value must equal ours.
+    const constant = /^\(= NREPL-NS-FIELD "([^"]*)"\)/m.exec(src);
+    assert.ok(constant, '(= NREPL-NS-FIELD "...") not found in tools.lpy');
+    assert.strictEqual(constant[1], core.NREPL_NS_FIELD);
+    // ...and every scope read and dispatch must go through that constant, not a literal.
     const def = /\(def _nrepl-request-scope [\s\S]*?(?=\n\(def )/.exec(src);
     assert.ok(def, '_nrepl-request-scope not found');
-    assert.ok(def[0].includes(`(.get msg "${ns}")`), def[0]);
+    assert.ok(def[0].includes('(.get msg NREPL-NS-FIELD)'), def[0]);
+    assert.ok(def[0].includes('(in NREPL-NS-FIELD fields)'), def[0]);
+    assert.ok(!def[0].includes(`"${core.NREPL_NS_FIELD}"`), def[0]);
     for (const op of ['eval', 'complete', 'macroexpand']) {
         const at = src.indexOf(`(== op "${op}")`);
         assert.ok(at >= 0, `dispatch for ${op} not found`);
         const fields = /_nrepl-request-scope msg (\[[^\]]*\])/.exec(src.slice(at))[1];
-        assert.strictEqual(fields, `["file" "${ns}"]`, op);
+        assert.strictEqual(fields, '["file" NREPL-NS-FIELD]', op);
     }
 });
