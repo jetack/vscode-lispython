@@ -310,7 +310,12 @@ async function runFile(): Promise<void> {
         await editor.document.save();
     }
 
-    const filePath = editor.document.uri.fsPath;
+    // An untitled or non-file buffer has no path lpy could run
+    const filePath = nreplFileOf(editor.document);
+    if (!filePath) {
+        vscode.window.showErrorMessage('Save the file to disk before running it.');
+        return;
+    }
     const lpy = getLpyCommand();
     const terminal = vscode.window.createTerminal({
         name: `Run: ${path.basename(filePath)}`,
