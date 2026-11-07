@@ -1314,3 +1314,52 @@ test('nreplCompletionItems reads only items', () => {
         core.nreplCompletionItems({ completions: ['A', 'f'], kinds: { A: 'class', f: 'macro' } }), []);
     assert.deepStrictEqual(core.nreplCompletionItems({}), []);
 });
+
+test('runtimeOnlyItems: LSP wins a clash, nREPL-only names pass through in order', () => {
+    const nrepl = [
+        { label: 'def', kind: 'Keyword' },
+        { label: 'my_var', kind: 'Variable' },
+        { label: 'print', kind: 'Function' },
+        { label: 'zed', kind: 'Variable' },
+    ];
+    const out = core.runtimeOnlyItems(['def', { label: 'print' }], nrepl);
+    assert.deepStrictEqual(out.map((i) => i.label), ['my_var', 'zed']);
+    assert.deepStrictEqual(core.runtimeOnlyItems([], nrepl), nrepl);
+});
+
+const mergeNrepl = [
+    { label: 'def', kind: 'Keyword' },
+    { label: 'my_var', kind: 'Variable' },
+];
+const mergeConvert = (i) => ({ label: i.label, from: 'nrepl' });
+const lspItem = (label) => ({ label, from: 'lsp' });
+const settled = (value) => ({ status: 'fulfilled', value });
+
+test('mergeCompletionResults: array result stays an array, LSP first, clash dropped', () => {
+    const out = core.mergeCompletionResults(settled([lspItem('print'), lspItem('def')]), mergeNrepl, mergeConvert);
+    assert.deepStrictEqual(out, [lspItem('print'), lspItem('def'), { label: 'my_var', from: 'nrepl' }]);
+});
+
+test('mergeCompletionResults: a list keeps isIncomplete', () => {
+    const out = core.mergeCompletionResults(
+        settled({ items: [lspItem('print')], isIncomplete: true }), mergeNrepl, mergeConvert);
+    assert.strictEqual(out.isIncomplete, true);
+    assert.deepStrictEqual(out.items.map((i) => i.label), ['print', 'def', 'my_var']);
+});
+
+test('mergeCompletionResults: null LSP yields the nREPL items only', () => {
+    const out = core.mergeCompletionResults(settled(null), mergeNrepl, mergeConvert);
+    assert.deepStrictEqual(out.map((i) => i.label), ['def', 'my_var']);
+});
+
+test('mergeCompletionResults: rejected LSP falls back to nREPL, rethrows when nREPL is empty', () => {
+    const rejected = { status: 'rejected', reason: new Error('lsp down') };
+    const out = core.mergeCompletionResults(rejected, mergeNrepl, mergeConvert);
+    assert.deepStrictEqual(out.map((i) => i.label), ['def', 'my_var']);
+    assert.throws(() => core.mergeCompletionResults(rejected, [], mergeConvert), /lsp down/);
+});
+
+test('mergeCompletionResults: nothing to add returns the LSP result untouched', () => {
+    const list = { items: [lspItem('def')], isIncomplete: true };
+    assert.strictEqual(core.mergeCompletionResults(settled(list), [mergeNrepl[0]], mergeConvert), list);
+});

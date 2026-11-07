@@ -10,11 +10,11 @@ import {
     ServerOptions,
 } from 'vscode-languageclient/node';
 import {
-    chooseNreplHome, findNreplPortFor, nreplCompletionItems, getReplHtml, makeNonce, NREPL_PORT_FILE,
+    chooseNreplHome, findNreplPortFor, nreplCompletionItems, type NreplCompletionItem, getReplHtml, makeNonce, NREPL_PORT_FILE,
     NreplConnectCancelled, checkServerIdEcho, NreplConnection, evalMessage, completeMessage, macroexpandMessage, nreplRequestOn, openFileRefusedMessage, openFileWarning, resolveActiveFile,
     resolveOpenableFile, nreplFileOf,
     NreplServerSupervisor, panelCompleteMessage, panelEvalMessage, ReplScopeState, replScopeChoices,
-    replScopeView, symbolPrefixStart,
+    replScopeView, symbolPrefixStart, mergeCompletionResults,
 } from './nreplCore';
 
 let client: LanguageClient | undefined;
@@ -235,6 +235,28 @@ async function startLspServer(): Promise<void> {
         documentSelector: [{ scheme: 'file', language: 'lispython' }],
         synchronize: {
             fileEvents: vscode.workspace.createFileSystemWatcher('**/*.lpy'),
+        },
+        middleware: {
+            provideCompletionItem: async (document, position, context, token, next) => {
+                const [lsp, runtime] = await Promise.allSettled([
+                    next(document, position, context, token),
+                    token.isCancellationRequested
+                        ? Promise.resolve(undefined)
+                        : fetchNreplCompletions(document, position),
+                ]);
+                // fetchNreplCompletions never rejects
+                const fetched = runtime.status === 'fulfilled' ? runtime.value : undefined;
+                const merged = mergeCompletionResults(lsp, fetched?.items ?? [], (entry) => {
+                    const item = toVscodeCompletionItems([entry], fetched!.range)[0];
+                    // VS Code orders by sortText, not array order: keep runtime names after the LSP's
+                    item.sortText = '￿' + entry.label;
+                    return item;
+                });
+                if (merged && !Array.isArray(merged)) {
+                    return new vscode.CompletionList(merged.items, merged.isIncomplete);
+                }
+                return merged;
+            },
         },
         errorHandler: {
             // Close the client after the first unexpected exit — don't crash-loop
@@ -1030,42 +1052,47 @@ async function macroexpand(): Promise<void> {
 // Completion provider (nREPL-backed)
 // ---------------------------------------------------------------------------
 
+/** The nREPL answer for the symbol prefix before the caret, or undefined when there is nothing to offer. */
+async function fetchNreplCompletions(
+    document: vscode.TextDocument,
+    position: vscode.Position,
+): Promise<{ items: NreplCompletionItem[]; range: vscode.Range } | undefined> {
+    if (!nreplConnected()) return undefined;
+    const lineText = document.lineAt(position.line).text;
+    const start = symbolPrefixStart(lineText, position.character);
+    const prefix = lineText.slice(start, position.character);
+    if (!prefix) return undefined;
+    try {
+        const items = nreplCompletionItems(await nreplRequest(completeMessage(prefix, document)));
+        if (items.length === 0) return undefined;
+        // Replace the prefix range so the completion replaces what was typed
+        return { items, range: new vscode.Range(position.line, start, position.line, position.character) };
+    } catch {
+        return undefined;
+    }
+}
+
+function toVscodeCompletionItems(items: NreplCompletionItem[], range: vscode.Range): vscode.CompletionItem[] {
+    return items.map((entry) => {
+        const item = new vscode.CompletionItem(
+            entry.description !== undefined
+                ? { label: entry.label, description: entry.description }
+                : entry.label,
+            vscode.CompletionItemKind[entry.kind]);
+        item.range = range;
+        return item;
+    });
+}
+
+/** Standalone nREPL completions; while the LSP client runs, its middleware merges them instead. */
 class NreplCompletionProvider implements vscode.CompletionItemProvider {
     async provideCompletionItems(
         document: vscode.TextDocument,
         position: vscode.Position,
     ): Promise<vscode.CompletionItem[] | undefined> {
-        // Only provide completions when nREPL is connected
-        if (!nreplConnected()) {
-            return undefined;
-        }
-
-        // Extract the prefix: walk backwards from cursor over symbol characters
-        const lineText = document.lineAt(position.line).text;
-        const start = symbolPrefixStart(lineText, position.character);
-        const prefix = lineText.slice(start, position.character);
-        if (!prefix) return undefined;
-
-        try {
-            const result = await nreplRequest(completeMessage(prefix, document));
-            const items = nreplCompletionItems(result);
-            if (items.length === 0) return undefined;
-            return items.map((entry) => {
-                const item = new vscode.CompletionItem(
-                    entry.description !== undefined
-                        ? { label: entry.label, description: entry.description }
-                        : entry.label,
-                    vscode.CompletionItemKind[entry.kind]);
-                // Replace the prefix range so the completion replaces what was typed
-                item.range = new vscode.Range(
-                    position.line, start,
-                    position.line, position.character,
-                );
-                return item;
-            });
-        } catch {
-            return undefined;
-        }
+        if (client?.isRunning()) return undefined;
+        const fetched = await fetchNreplCompletions(document, position);
+        return fetched && toVscodeCompletionItems(fetched.items, fetched.range);
     }
 }
 

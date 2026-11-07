@@ -54,6 +54,49 @@ export function nreplCompletionItems(result: Record<string, unknown>): NreplComp
     return out;
 }
 
+/**
+ * The one merge rule for the LSP and nREPL completion lists: on an exact label
+ * clash the LSP item wins, so only the nREPL items the LSP did not offer
+ * (runtime names) are returned, in nREPL order. It is client-side because only
+ * the client holds both answers; the nREPL cannot know what the LSP resolved.
+ */
+export function runtimeOnlyItems(
+    lspLabels: Iterable<string | { label: string }>,
+    nreplItems: NreplCompletionItem[],
+): NreplCompletionItem[] {
+    const seen = new Set<string>();
+    for (const l of lspLabels) seen.add(typeof l === 'string' ? l : l.label);
+    return nreplItems.filter((item) => !seen.has(item.label));
+}
+
+/** An LSP completion result as the client middleware sees it: an array, a list, or nothing. */
+export type LspCompletionResult<T> = T[] | { items: T[]; isIncomplete?: boolean } | null | undefined;
+
+/**
+ * Merge the LSP outcome with the nREPL items: LSP items first, then the
+ * runtime-only nREPL items converted by `convert`. The LSP result keeps its
+ * shape (array stays array, list keeps isIncomplete). With nothing to add the
+ * LSP result is returned as is; a rejected LSP with nothing to add rethrows.
+ */
+export function mergeCompletionResults<T extends { label: string | { label: string } }>(
+    lsp: PromiseSettledResult<LspCompletionResult<T>>,
+    nreplItems: NreplCompletionItem[],
+    convert: (item: NreplCompletionItem) => T,
+): LspCompletionResult<T> {
+    const lspResult = lsp.status === 'fulfilled' ? lsp.value : undefined;
+    const lspItems = Array.isArray(lspResult) ? lspResult : lspResult?.items ?? [];
+    const extra = runtimeOnlyItems(lspItems.map((i) => i.label), nreplItems).map(convert);
+    if (extra.length === 0) {
+        if (lsp.status === 'rejected') throw lsp.reason;
+        return lspResult;
+    }
+    const merged = [...lspItems, ...extra];
+    if (lspResult && !Array.isArray(lspResult)) {
+        return { items: merged, isIncomplete: lspResult.isIncomplete };
+    }
+    return merged;
+}
+
 /** The server writes bare decimal digits, no newline. */
 export function parsePortFile(text: string): number | undefined {
     const t = text.trim();
