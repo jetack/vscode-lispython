@@ -1267,6 +1267,8 @@ test('NREPL_NS_FIELD mirrors the field lispython reads for eval/complete/macroex
     const def = /\(def _nrepl-request-scope [\s\S]*?(?=\n\(def )/.exec(src);
     assert.ok(def, '_nrepl-request-scope not found');
     assert.ok(def[0].includes('(.get msg NREPL-NS-FIELD)'), def[0]);
+    assert.ok(def[0].includes('(in NREPL-NS-FIELD fields)'), def[0]);
+    assert.ok(!def[0].includes(`"${core.NREPL_NS_FIELD}"`), def[0]);
     for (const op of ['eval', 'complete', 'macroexpand']) {
         const at = src.indexOf(`(== op "${op}")`);
         assert.ok(at >= 0, `dispatch for ${op} not found`);
