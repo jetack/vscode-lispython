@@ -70,7 +70,7 @@ export function nreplCompletionItems(result: Record<string, unknown>): NreplComp
             const details = entry.labelDetails;
             if (typeof details === 'object' && details !== null) {
                 const description = (details as Record<string, unknown>).description;
-                if (typeof description === 'string') item.description = description;
+                if (typeof description === 'string' && description !== '') item.description = description;
             }
             out.push(item);
         }

@@ -1297,6 +1297,7 @@ test('nreplCompletionItems prefers items and skips malformed entries', () => {
             { label: 'defmacro', kind: 3, labelDetails: { description: 'macro' } },
             { label: 'print', kind: 3 },
             { label: 'x', kind: 99 },
+            { label: 'empty', kind: 3, labelDetails: { description: '' } },
             { kind: 3 },
         ],
         completions: ['stale'],
@@ -1307,7 +1308,16 @@ test('nreplCompletionItems prefers items and skips malformed entries', () => {
         { label: 'defmacro', kind: 'Function', description: 'macro' },
         { label: 'print', kind: 'Function' },
         { label: 'x', kind: 'Function' },
+        { label: 'empty', kind: 'Function' },
     ]);
+});
+
+test('lspCompletionKindName agrees with the LSP CompletionItemKind enum', () => {
+    const entries = Object.entries(require('vscode-languageserver-types').CompletionItemKind);
+    assert.strictEqual(entries.length, 25);
+    for (const [name, value] of entries) {
+        assert.strictEqual(core.lspCompletionKindName(value), name, `kind ${value}`);
+    }
 });
 
 test('nreplCompletionItems falls back to completions and kinds', () => {
