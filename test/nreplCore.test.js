@@ -1276,3 +1276,53 @@ test('NREPL_NS_FIELD mirrors the field lispython reads for eval/complete/macroex
         assert.strictEqual(fields, '["file" NREPL-NS-FIELD]', op);
     }
 });
+
+test('lspCompletionKindName maps 1-based LSP kinds to VS Code names', () => {
+    const k = core.lspCompletionKindName;
+    assert.strictEqual(k(1), 'Text');
+    assert.strictEqual(k(3), 'Function');
+    assert.strictEqual(k(6), 'Variable');
+    assert.strictEqual(k(7), 'Class');
+    assert.strictEqual(k(14), 'Keyword');
+    assert.strictEqual(k(25), 'TypeParameter');
+    for (const bad of [0, 26, -1, 3.5, NaN, '3', undefined, null]) {
+        assert.strictEqual(k(bad), 'Function', String(bad));
+    }
+});
+
+test('nreplCompletionItems prefers items and skips malformed entries', () => {
+    const got = core.nreplCompletionItems({
+        items: [
+            { label: 'if', kind: 14, labelDetails: { description: 'special form' } },
+            { label: 'defmacro', kind: 3, labelDetails: { description: 'macro' } },
+            { label: 'print', kind: 3 },
+            { label: 'x', kind: 99 },
+            { label: 'empty', kind: 3, labelDetails: { description: '' } },
+            { kind: 3 },
+        ],
+        completions: ['stale'],
+        kinds: { stale: 'class' },
+    });
+    assert.deepStrictEqual(got, [
+        { label: 'if', kind: 'Keyword', description: 'special form' },
+        { label: 'defmacro', kind: 'Function', description: 'macro' },
+        { label: 'print', kind: 'Function' },
+        { label: 'x', kind: 'Function' },
+        { label: 'empty', kind: 'Function' },
+    ]);
+});
+
+test('lspCompletionKindName agrees with the LSP CompletionItemKind enum', () => {
+    const entries = Object.entries(require('vscode-languageserver-types').CompletionItemKind);
+    assert.strictEqual(entries.length, 25);
+    for (const [name, value] of entries) {
+        assert.strictEqual(core.lspCompletionKindName(value), name, `kind ${value}`);
+    }
+});
+
+test('nreplCompletionItems falls back to completions and kinds', () => {
+    assert.deepStrictEqual(
+        core.nreplCompletionItems({ completions: ['A', 'f'], kinds: { A: 'class', f: 'macro' } }),
+        [{ label: 'A', kind: 'Class' }, { label: 'f', kind: 'Function' }]);
+    assert.deepStrictEqual(core.nreplCompletionItems({}), []);
+});

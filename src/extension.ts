@@ -10,7 +10,7 @@ import {
     ServerOptions,
 } from 'vscode-languageclient/node';
 import {
-    chooseNreplHome, completionKindName, findNreplPortFor, getReplHtml, makeNonce, NREPL_PORT_FILE,
+    chooseNreplHome, findNreplPortFor, nreplCompletionItems, getReplHtml, makeNonce, NREPL_PORT_FILE,
     NreplConnectCancelled, checkServerIdEcho, NreplConnection, evalMessage, completeMessage, macroexpandMessage, nreplRequestOn, openFileRefusedMessage, openFileWarning, resolveActiveFile,
     resolveOpenableFile, nreplFileOf,
     NreplServerSupervisor, panelCompleteMessage, panelEvalMessage, ReplScopeState, replScopeChoices,
@@ -705,9 +705,7 @@ async function completeFromPanel(prefix: string): Promise<string[]> {
     if (!nreplConnected()) return [];
     try {
         const result = await nreplRequest(panelCompleteMessage(prefix, replScope.current));
-        return Array.isArray(result.completions)
-            ? result.completions.filter((c: unknown): c is string => typeof c === 'string')
-            : [];
+        return nreplCompletionItems(result).map((item) => item.label);
     } catch {
         return [];
     }
@@ -1050,12 +1048,14 @@ class NreplCompletionProvider implements vscode.CompletionItemProvider {
 
         try {
             const result = await nreplRequest(completeMessage(prefix, document));
-            if (!result.completions || !Array.isArray(result.completions)) {
-                return undefined;
-            }
-            return result.completions.map((name: string) => {
+            const items = nreplCompletionItems(result);
+            if (items.length === 0) return undefined;
+            return items.map((entry) => {
                 const item = new vscode.CompletionItem(
-                    name, vscode.CompletionItemKind[completionKindName(result.kinds, name)]);
+                    entry.description !== undefined
+                        ? { label: entry.label, description: entry.description }
+                        : entry.label,
+                    vscode.CompletionItemKind[entry.kind]);
                 // Replace the prefix range so the completion replaces what was typed
                 item.range = new vscode.Range(
                     position.line, start,
