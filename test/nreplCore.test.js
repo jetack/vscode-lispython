@@ -332,6 +332,57 @@ webviewTest('webview: Tab completes the symbol before the caret', (core) => {
     assert.ok(w.els.candidates.textContent.includes('printf'));
 });
 
+// `complete` replies captured from the real servers, verbatim. NEW_*: lispython's
+// segment-labelled reply with `word` (TASK-1144 branch); OLD_*: lispython main, which
+// has no `word` and labels with full dotted names.
+const NEW_HEAPQ_NL = { op: 'complete-result', word: 'nl', completions: ['heapq.nlargest'], items: [{ label: 'nlargest', kind: 3 }], id: 10 };
+const NEW_HEAPQ_HEAPPU = { op: 'complete-result', word: 'heappu', completions: ['heapq.heappush', 'heapq.heappush-max', 'heapq.heappushpop', 'heapq.heappushpop-max'], items: [{ label: 'heappush', kind: 3 }, { label: 'heappush-max', kind: 3 }, { label: 'heappushpop', kind: 3 }, { label: 'heappushpop-max', kind: 3 }], id: 11 };
+// Reply to `heapq.`, trimmed from the capture to its `op`, `word` and `id`.
+const NEW_HEAPQ_DOT = { op: 'complete-result', word: '', id: 10 };
+const OLD_HEAPQ_NL = { op: 'complete-result', completions: ['heapq.nlargest'], items: [{ label: 'heapq.nlargest', kind: 3 }], id: 10 };
+const OLD_HEAPQ_HEAPPU = { op: 'complete-result', completions: ['heapq.heappush', 'heapq.heappushpop'], items: [{ label: 'heapq.heappush', kind: 3 }, { label: 'heapq.heappushpop', kind: 3 }], id: 11 };
+const labelsOf = (reply) => core.nreplCompletionItems(reply).map((i) => i.label);
+
+test('nreplReplaceStart: the new reply replaces its word, the old reply the whole prefix', () => {
+    // Caret at the end of `(heapq.nl` (9): the prefix `heapq.nl` starts at 1.
+    assert.strictEqual(core.nreplReplaceStart(9, 'heapq.nl', NEW_HEAPQ_NL.word), 7);
+    assert.strictEqual(core.nreplReplaceStart(9, 'heapq.nl', OLD_HEAPQ_NL.word), 1);
+    // An empty word is a real answer (the members of `heapq.`), not a missing one.
+    assert.strictEqual(core.nreplReplaceStart(7, 'heapq.', NEW_HEAPQ_DOT.word), 7);
+    // A word the typed prefix does not end with cannot be replaced: whole prefix.
+    assert.strictEqual(core.nreplReplaceStart(9, 'heapq.nl', 'xy'), 1);
+});
+
+/** Tab on `typed` in the panel, answered as completeFromPanel does: labels plus the raw `word`. */
+function tabWithReply(core, typed, reply) {
+    const w = loadReplWebview(core);
+    w.type(typed);
+    w.key('Tab');
+    w.send({ type: 'completions', requestId: w.posted.at(-1).requestId, items: labelsOf(reply), word: reply.word });
+    return w;
+}
+
+webviewTest('webview: segment labels replace only the reply word', (core) => {
+    const w = tabWithReply(core, '(heapq.nl', NEW_HEAPQ_NL);
+    assert.strictEqual(w.input.value, '(heapq.nlargest');
+    assert.strictEqual(w.input.selectionStart, '(heapq.nlargest'.length);
+    // The common prefix of the labels (`heappush`) extends the word, not the whole prefix.
+    assert.strictEqual(tabWithReply(core, '(heapq.heappu', NEW_HEAPQ_HEAPPU).input.value, '(heapq.heappush');
+});
+
+webviewTest('webview: full dotted labels without word still replace the whole prefix', (core) => {
+    assert.strictEqual(tabWithReply(core, '(heapq.nl', OLD_HEAPQ_NL).input.value, '(heapq.nlargest');
+    assert.strictEqual(tabWithReply(core, '(heapq.heappu', OLD_HEAPQ_HEAPPU).input.value, '(heapq.heappush');
+});
+
+webviewTest('webview: a word the prefix does not end with falls back to the whole prefix', (core) => {
+    const w = loadReplWebview(core);
+    w.type('(heapq.nl');
+    w.key('Tab');
+    w.send({ type: 'completions', requestId: w.posted.at(-1).requestId, items: ['heapq.nlargest'], word: 'zz' });
+    assert.strictEqual(w.input.value, '(heapq.nlargest');
+});
+
 webviewTest('webview: a completions reply is dropped when the caret moved since its request', (core) => {
     const w = loadReplWebview(core);
     w.type('(foo-ba x)', 7);

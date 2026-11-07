@@ -14,7 +14,7 @@ import {
     NreplConnectCancelled, checkServerIdEcho, NreplConnection, evalMessage, completeMessage, macroexpandMessage, nreplRequestOn, openFileRefusedMessage, openFileWarning, resolveActiveFile,
     resolveOpenableFile, nreplFileOf,
     NreplServerSupervisor, panelCompleteMessage, panelEvalMessage, ReplScopeState, replScopeChoices,
-    replScopeView, symbolPrefixStart, mergeCompletionResults,
+    replScopeView, symbolPrefixStart, mergeCompletionResults, nreplReplaceStart,
 } from './nreplCore';
 
 let client: LanguageClient | undefined;
@@ -647,8 +647,8 @@ function getOrCreateReplPanel(): vscode.WebviewPanel {
             return;
         }
         if (msg?.type === 'complete' && typeof msg.prefix === 'string' && msg.prefix !== '' && Number.isSafeInteger(msg.requestId)) {
-            const items = await completeFromPanel(msg.prefix);
-            if (nreplPanel === panel) panel.webview.postMessage({ type: 'completions', requestId: msg.requestId, items });
+            const { items, word } = await completeFromPanel(msg.prefix);
+            if (nreplPanel === panel) panel.webview.postMessage({ type: 'completions', requestId: msg.requestId, items, word });
             return;
         }
         if (msg?.type === 'pickScope') {
@@ -722,14 +722,17 @@ async function evalFromPanel(code: string): Promise<void> {
     }
 }
 
-/** Completions for the panel input; never starts a server, and any failure is no completions. */
-async function completeFromPanel(prefix: string): Promise<string[]> {
-    if (!nreplConnected()) return [];
+/**
+ * Completions for the panel input; never starts a server, and any failure is no completions.
+ * `word` is the reply's raw field: the webview resolves it with nreplReplaceStart.
+ */
+async function completeFromPanel(prefix: string): Promise<{ items: string[]; word?: unknown }> {
+    if (!nreplConnected()) return { items: [] };
     try {
         const result = await nreplRequest(panelCompleteMessage(prefix, replScope.current));
-        return nreplCompletionItems(result).map((item) => item.label);
+        return { items: nreplCompletionItems(result).map((item) => item.label), word: result.word };
     } catch {
-        return [];
+        return { items: [] };
     }
 }
 
@@ -1063,10 +1066,12 @@ async function fetchNreplCompletions(
     const prefix = lineText.slice(start, position.character);
     if (!prefix) return undefined;
     try {
-        const items = nreplCompletionItems(await nreplRequest(completeMessage(prefix, document)));
+        const result = await nreplRequest(completeMessage(prefix, document));
+        const items = nreplCompletionItems(result);
         if (items.length === 0) return undefined;
-        // Replace the prefix range so the completion replaces what was typed
-        return { items, range: new vscode.Range(position.line, start, position.line, position.character) };
+        // Labels replace only the reply's word (e.g. `nl` of `heapq.nl`), or the whole prefix.
+        const replacedStart = nreplReplaceStart(position.character, prefix, result.word);
+        return { items, range: new vscode.Range(position.line, replacedStart, position.line, position.character) };
     } catch {
         return undefined;
     }

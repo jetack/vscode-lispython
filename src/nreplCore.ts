@@ -748,6 +748,18 @@ export function symbolPrefixStart(text: string, caret: number): number {
     return start;
 }
 
+/**
+ * Start of the text that every label of a `complete` reply replaces, given the caret, the
+ * typed `prefix` ending at it, and the reply's `word` field. A server that labels by the
+ * segment after the prefix's last `.` sends `word` (the typed part of that segment, in JS
+ * string units); an older server sends no `word` and full dotted labels, which replace the
+ * whole prefix. A `word` the prefix does not end with is untrusted and falls back to the
+ * whole prefix. The one replace rule for editor and panel completion; injected into the webview.
+ */
+export function nreplReplaceStart(caret: number, prefix: string, word: unknown): number {
+    return caret - (typeof word === 'string' && prefix.endsWith(word) ? word : prefix).length;
+}
+
 /** Longest common prefix of `items` ('' for none). */
 export function longestCommonPrefix(items: readonly string[]): string {
     if (items.length === 0) return '';
@@ -847,7 +859,8 @@ function scriptLiteral(value: unknown): string {
  * Webview → extension messages: `eval {code}`, `complete {prefix, requestId}`, `pickScope`,
  * `openFile {file, line}`. Extension → webview: `eval {code, result, prompt?}` (prompt
  * defaults to `repl`), `clear` (entries only), `scope {label, title}`,
- * `completions {requestId, items}`, `focusInput`.
+ * `completions {requestId, items, word?}` (`word`: the `complete` reply's raw field, untrusted;
+ * the webview resolves it with nreplReplaceStart), `focusInput`.
  */
 export function getReplHtml(
     nonce: string,
@@ -978,28 +991,30 @@ export function getReplHtml(
     const prefix = input.value.slice(start, caret);
     if (prefix === '') return false;
     completionSeq += 1;
-    pendingCompletion = { requestId: completionSeq, start: start, caret: caret, value: input.value, prefix: prefix };
+    pendingCompletion = { requestId: completionSeq, caret: caret, value: input.value, prefix: prefix };
     vscode.postMessage({ type: 'complete', prefix: prefix, requestId: completionSeq });
     return true;
   }
 
-  function applyCompletions(requestId, items) {
+  function applyCompletions(requestId, items, word) {
     const pending = pendingCompletion;
     if (pending === null || pending.requestId !== requestId) return;
     pendingCompletion = null;
     // Edited since the request: the answer is for text that is gone.
     if (input.value !== pending.value || input.selectionStart !== pending.caret) return;
     const names = Array.isArray(items) ? items.filter((s) => typeof s === 'string') : [];
+    const start = nreplReplaceStart(pending.caret, pending.prefix, word);
+    const replaced = pending.value.slice(start, pending.caret);
     const replaceWith = (text) => setInput(
-      pending.value.slice(0, pending.start) + text + pending.value.slice(pending.caret),
-      pending.start + text.length);
+      pending.value.slice(0, start) + text + pending.value.slice(pending.caret),
+      start + text.length);
     if (names.length === 1) {
       replaceWith(names[0]);
       showCandidates([]);
       return;
     }
     const common = longestCommonPrefix(names);
-    if (common.length > pending.prefix.length && common.startsWith(pending.prefix)) replaceWith(common);
+    if (common.length > replaced.length && common.startsWith(replaced)) replaceWith(common);
     showCandidates(names);
   }
 
@@ -1032,7 +1047,7 @@ export function getReplHtml(
     if (msg.type === 'clear') { entries.innerHTML = ''; return; }
     if (msg.type === 'scope') { renderScope(msg); return; }
     if (msg.type === 'focusInput') { input.focus(); return; }
-    if (msg.type === 'completions') { applyCompletions(msg.requestId, msg.items); return; }
+    if (msg.type === 'completions') { applyCompletions(msg.requestId, msg.items, msg.word); return; }
     if (msg.type !== 'eval') return;
     const { code, result } = msg;
     const prompt = typeof msg.prompt === 'string' ? msg.prompt : 'repl';
@@ -1062,6 +1077,8 @@ export function getReplHtml(
   ${injectWebviewFunction(symbolPrefixStart, 'symbolPrefixStart')}
 
   ${injectWebviewFunction(longestCommonPrefix, 'longestCommonPrefix')}
+
+  ${injectWebviewFunction(nreplReplaceStart, 'nreplReplaceStart')}
 
   document.addEventListener('click', (e) => {
     const link = e.target.closest('.file-link');
