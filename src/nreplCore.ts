@@ -859,8 +859,8 @@ function scriptLiteral(value: unknown): string {
  * Webview → extension messages: `eval {code}`, `complete {prefix, requestId}`, `pickScope`,
  * `openFile {file, line}`. Extension → webview: `eval {code, result, prompt?}` (prompt
  * defaults to `repl`), `clear` (entries only), `scope {label, title}`,
- * `completions {requestId, items, word?}` (`word`: the reply's replaced text, see
- * nreplReplacedText; absent means the whole prefix), `focusInput`.
+ * `completions {requestId, items, word?}` (`word`: the `complete` reply's raw field, untrusted;
+ * the webview resolves it with nreplReplacedText), `focusInput`.
  */
 export function getReplHtml(
     nonce: string,

@@ -722,17 +722,17 @@ async function evalFromPanel(code: string): Promise<void> {
     }
 }
 
-/** Completions for the panel input; never starts a server, and any failure is no completions. */
-async function completeFromPanel(prefix: string): Promise<{ items: string[]; word: string }> {
-    if (!nreplConnected()) return { items: [], word: prefix };
+/**
+ * Completions for the panel input; never starts a server, and any failure is no completions.
+ * `word` is the reply's raw field: the webview resolves it with nreplReplacedText.
+ */
+async function completeFromPanel(prefix: string): Promise<{ items: string[]; word?: unknown }> {
+    if (!nreplConnected()) return { items: [] };
     try {
         const result = await nreplRequest(panelCompleteMessage(prefix, replScope.current));
-        return {
-            items: nreplCompletionItems(result).map((item) => item.label),
-            word: nreplReplacedText(result.word, prefix),
-        };
+        return { items: nreplCompletionItems(result).map((item) => item.label), word: result.word };
     } catch {
-        return { items: [], word: prefix };
+        return { items: [] };
     }
 }
 
