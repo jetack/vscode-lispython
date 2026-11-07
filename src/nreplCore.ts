@@ -280,6 +280,36 @@ const readers = new WeakMap<net.Socket, NreplReader>();
 export const NREPL_MAX_EVAL_LINE = 1_000_000;
 export const NREPL_MAX_EVAL_COLUMN = 100_000;
 
+type NreplDocId = { uri: { fsPath: string; scheme: string }; isUntitled: boolean };
+
+/**
+ * The file path the nREPL server knows `doc` by, or undefined when it has none (untitled or
+ * non-`file` scheme). The server keys each file's scope by its normalised path, so eval, complete,
+ * macroexpand and load-file must all take the path from here: another spelling would split one
+ * file into two scopes. Contract: lispython src/lispy/tools.lpy `_nrepl-dispatch`.
+ */
+export function nreplFileOf(doc: NreplDocId): string | undefined {
+    return doc.isUntitled || doc.uri.scheme !== 'file' ? undefined : doc.uri.fsPath;
+}
+
+/**
+ * `complete` request answered from `doc`'s file scope on the server (so its own definitions
+ * complete); no `file` key for a document without one, which answers from the session scope.
+ */
+export function completeMessage(prefix: string, doc: NreplDocId): Record<string, unknown> {
+    const file = nreplFileOf(doc);
+    return file === undefined ? { op: 'complete', prefix } : { op: 'complete', prefix, file };
+}
+
+/**
+ * `macroexpand` request expanded in `doc`'s file scope on the server (so macros defined in the
+ * file expand); no `file` key for a document without one. Same path rule as eval.
+ */
+export function macroexpandMessage(code: string, doc: NreplDocId): Record<string, unknown> {
+    const file = nreplFileOf(doc);
+    return file === undefined ? { op: 'macroexpand', code } : { op: 'macroexpand', code, file };
+}
+
 /**
  * The nREPL `eval` request for the text of `doc` at `range` (`code` is exactly that text).
  * `file`, `line` and `column` (1-based, the position of the code's first character, `range[0]`)
@@ -291,20 +321,19 @@ export const NREPL_MAX_EVAL_COLUMN = 100_000;
  */
 export function evalMessage(
     code: string,
-    doc: {
-        uri: { fsPath: string; scheme: string };
-        isUntitled: boolean;
+    doc: NreplDocId & {
         positionAt(offset: number): { line: number; character: number };
         lineAt(line: number): { text: string };
     },
     range: [number, number],
 ): Record<string, unknown> {
-    if (doc.isUntitled || doc.uri.scheme !== 'file') return { op: 'eval', code };
+    const file = nreplFileOf(doc);
+    if (file === undefined) return { op: 'eval', code };
     const start = doc.positionAt(range[0]);
     const line = start.line + 1;
     const column = [...doc.lineAt(start.line).text.slice(0, start.character)].length + 1;
     if (line > NREPL_MAX_EVAL_LINE || column > NREPL_MAX_EVAL_COLUMN) return { op: 'eval', code };
-    return { op: 'eval', code, file: doc.uri.fsPath, line, column };
+    return { op: 'eval', code, file, line, column };
 }
 
 /**
