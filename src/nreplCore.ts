@@ -495,11 +495,24 @@ export class NreplConnection {
 }
 
 // escapeHtml and linkifyErrors are injected into the REPL webview script via
-// Function.prototype.toString (see getReplHtml below), so they must stay
-// self-contained: linkifyErrors may reference only escapeHtml, by name. A bundler or
-// minifier (esbuild/webpack/terser) would rename or inline them and break the
-// injection; the getReplHtml script test in test/ pins this only for the tsc output
-// in out/. If a bundle ever becomes `main`, the test must run against the bundle.
+// Function.prototype.toString (see injectWebviewFunction), so they must stay
+// self-contained: an injected function may reference only other injected functions,
+// by name. The shipped `main` is a minified esbuild bundle, which renames them; the
+// injection re-binds each under its source name. The webview script tests run against
+// both the tsc output and a production-minified bundle of this module.
+
+/**
+ * Source text declaring `fn` in the webview script under `name`. A minifier renames a
+ * function and every reference to it, so the text declares the minified name (which other
+ * injected functions call) and binds `name` to it for the hand-written script.
+ */
+// eslint-disable-next-line @typescript-eslint/no-unsafe-function-type -- any function's source text
+export function injectWebviewFunction(fn: Function, name: string): string {
+    const src = fn.toString();
+    const declared = /^function\s+([\w$]+)\s*\(/.exec(src)?.[1];
+    if (declared === undefined) throw new Error(`cannot inject ${name}: not a function declaration`);
+    return declared === name ? src : `${src}\nconst ${name} = ${declared};`;
+}
 
 /** Escapes text for both element content and double/single-quoted attribute values. */
 export function escapeHtml(s: string): string {
@@ -658,9 +671,9 @@ export function getReplHtml(nonce: string, cspSource: string): string {
     div.scrollIntoView({ behavior: 'smooth' });
   });
 
-  ${escapeHtml.toString()}
+  ${injectWebviewFunction(escapeHtml, 'escapeHtml')}
 
-  ${linkifyErrors.toString()}
+  ${injectWebviewFunction(linkifyErrors, 'linkifyErrors')}
 
   document.addEventListener('click', (e) => {
     const link = e.target.closest('.file-link');

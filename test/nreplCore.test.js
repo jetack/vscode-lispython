@@ -194,7 +194,27 @@ test('getReplHtml carries a nonce-based CSP on every script and style tag', () =
     assert.notStrictEqual(core.makeNonce(), core.makeNonce());
 });
 
-test('injected escapeHtml/linkifyErrors work inside the webview script', () => {
+// The webview script is assembled from function source text, and the shipped `main` is a
+// minified bundle that renames those functions, so every webview test runs on both builds.
+const coreBundlePath = process.env.LISPY_CORE_BUNDLE
+    ? path.resolve(process.cwd(), process.env.LISPY_CORE_BUNDLE)
+    : undefined;
+const webviewBuilds = [['tsc', () => core], ['minified bundle', () => {
+    if (coreBundlePath === undefined) return undefined;
+    return require(coreBundlePath);
+}]];
+
+function webviewTest(name, fn) {
+    for (const [build, load] of webviewBuilds) {
+        test(`${name} [${build}]`, (t) => {
+            const c = load();
+            if (c === undefined) return t.skip('LISPY_CORE_BUNDLE not set; run `bun run test`');
+            return fn(c, t);
+        });
+    }
+}
+
+webviewTest('injected escapeHtml/linkifyErrors work inside the webview script', (core) => {
     const vm = require('node:vm');
     const html = core.getReplHtml('n', 'c');
     const script = /<script nonce="n">([\s\S]*?)<\/script>/.exec(html)[1];
