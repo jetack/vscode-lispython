@@ -6,15 +6,6 @@ const path = require('path');
 const net = require('net');
 const core = require('../out-test/nreplCore');
 
-test('kind mapping', () => {
-    const kinds = { A: 'class', f: 'function', v: 'variable', m: 'macro', k: 'keyword', x: 'weird' };
-    const got = Object.keys(kinds).map((n) => core.completionKindName(kinds, n));
-    assert.deepStrictEqual(got, ['Class', 'Function', 'Variable', 'Function', 'Keyword', 'Function']);
-    assert.strictEqual(core.completionKindName(undefined, 'a'), 'Function');
-    assert.strictEqual(core.completionKindName({}, 'toString'), 'Function');
-    assert.strictEqual(core.completionKindName({ a: 'constructor' }, 'a'), 'Function');
-});
-
 test('parsePortFile', () => {
     assert.strictEqual(core.parsePortFile('5555'), 5555);
     assert.strictEqual(core.parsePortFile('5555\n'), 5555);
@@ -1300,8 +1291,6 @@ test('nreplCompletionItems prefers items and skips malformed entries', () => {
             { label: 'empty', kind: 3, labelDetails: { description: '' } },
             { kind: 3 },
         ],
-        completions: ['stale'],
-        kinds: { stale: 'class' },
     });
     assert.deepStrictEqual(got, [
         { label: 'if', kind: 'Keyword', description: 'special form' },
@@ -1320,9 +1309,8 @@ test('lspCompletionKindName agrees with the LSP CompletionItemKind enum', () => 
     }
 });
 
-test('nreplCompletionItems falls back to completions and kinds', () => {
+test('nreplCompletionItems reads only items', () => {
     assert.deepStrictEqual(
-        core.nreplCompletionItems({ completions: ['A', 'f'], kinds: { A: 'class', f: 'macro' } }),
-        [{ label: 'A', kind: 'Class' }, { label: 'f', kind: 'Function' }]);
+        core.nreplCompletionItems({ completions: ['A', 'f'], kinds: { A: 'class', f: 'macro' } }), []);
     assert.deepStrictEqual(core.nreplCompletionItems({}), []);
 });
