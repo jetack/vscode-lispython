@@ -192,14 +192,41 @@ buildTest('VS Code finds the spec word of every spec case with the wordPattern',
     const wrong = [];
     for (const c of SPEC.cases.map(utf16Case)) {
         const span = { ...c, leafStart: core.completionWordSpan(c.text, c.caret, rule).leafStart };
-        if (c.caret < span.leafStart) exempt.push(show(c.text, c.caret));
+        if (c.caret < span.leafStart) exempt.push({ c, leafStart: span.leafStart });
         const [got, want] = [vscodeWord(c.text, c.caret), expectedWord(span, c.caret)];
         if (JSON.stringify(got) !== JSON.stringify(want)) wrong.push(`${show(c.text, c.caret)}: ${JSON.stringify(got)}, want ${JSON.stringify(want)}`);
         assertNoEmptyMatch(c.text);
     }
     assert.deepStrictEqual(wrong, []);
-    // Only a caret inside a peeled front is exempt from the spec's span.
-    assert.deepStrictEqual(exempt, ['"-|-x"', '"*|*x"']);
+    // Only a caret inside a real peeled front is exempt: the spec's word there is not empty
+    // and starts before the leaf, and only peelable entries lie between, so a leafStart
+    // past the true one cannot hide a regex word.
+    const peelable = new RegExp(`^(?:${[...rule.tokenPrefixes, ...rule.signs]
+        .map((e) => e.replace(/[\\^$.*+?()[\]{}|/]/g, '\\$&')).join('|')})+$`, 'u');
+    for (const { c, leafStart } of exempt) {
+        const at = show(c.text, c.caret);
+        assert.ok(c.replaceStart < c.end, `${at}: the spec word is empty`);
+        assert.ok(c.start < leafStart, `${at}: the spec word starts at the leaf`);
+        assert.match(c.text.slice(c.start, leafStart), peelable, `${at}: the front holds more than peels`);
+    }
+});
+
+test('the wordPattern stays fast on long runs of signs', () => {
+    // A column inside a signs run must fail the regex's cheap guard: re-lexing the run
+    // there is quadratic per exec, and VS Code's 150 ms budget is checked only between them.
+    const core = require('../out-test/nreplCore');
+    const rule = core.wordBoundaryRule();
+    const lines = ['x' + '-'.repeat(999), '-'.repeat(500) + '1'.repeat(499), '+-'.repeat(200) + 'ab', '-'.repeat(400)];
+    for (const line of lines) {
+        for (const caret of [line.length, line.length >> 1, line.length - 20, 1]) {
+            const t0 = Date.now();
+            const word = vscodeWord(line, caret);
+            const ms = Date.now() - t0;
+            const label = `${JSON.stringify(line.slice(0, 12))}… (${line.length}) at ${caret}`;
+            assert.ok(ms < 50, `${label}: ${ms} ms`);
+            assert.deepStrictEqual(word, expectedWord(core.completionWordSpan(line, caret, rule), caret), label);
+        }
+    }
 });
 
 test('the wordPattern finds a word whose run starts more than 15 columns back', () => {
