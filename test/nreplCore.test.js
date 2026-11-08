@@ -1386,28 +1386,46 @@ const mergeConvert = (i) => ({ label: i.label, from: 'nrepl' });
 const lspItem = (label) => ({ label, from: 'lsp' });
 const settled = (value) => ({ status: 'fulfilled', value });
 
-test('mergeCompletionResults: array result stays an array, LSP first, clash dropped', () => {
+test('mergeCompletionResults: array result becomes an incomplete list, LSP first, clash dropped', () => {
     const out = core.mergeCompletionResults(settled([lspItem('print'), lspItem('def')]), mergeNrepl, mergeConvert);
-    assert.deepStrictEqual(out, [lspItem('print'), lspItem('def'), { label: 'my_var', from: 'nrepl' }]);
+    assert.deepStrictEqual(out, {
+        items: [lspItem('print'), lspItem('def'), { label: 'my_var', from: 'nrepl' }],
+        isIncomplete: true,
+    });
 });
 
-test('mergeCompletionResults: a list keeps isIncomplete', () => {
+test('mergeCompletionResults: a complete list turns incomplete once nREPL items join', () => {
     const out = core.mergeCompletionResults(
-        settled({ items: [lspItem('print')], isIncomplete: true }), mergeNrepl, mergeConvert);
+        settled({ items: [lspItem('print')], isIncomplete: false }), mergeNrepl, mergeConvert);
     assert.strictEqual(out.isIncomplete, true);
     assert.deepStrictEqual(out.items.map((i) => i.label), ['print', 'def', 'my_var']);
 });
 
-test('mergeCompletionResults: null LSP yields the nREPL items only', () => {
+test('mergeCompletionResults: null LSP yields the nREPL items as an incomplete list', () => {
     const out = core.mergeCompletionResults(settled(null), mergeNrepl, mergeConvert);
-    assert.deepStrictEqual(out.map((i) => i.label), ['def', 'my_var']);
+    assert.deepStrictEqual(out.items.map((i) => i.label), ['def', 'my_var']);
+    assert.strictEqual(out.isIncomplete, true);
 });
 
 test('mergeCompletionResults: rejected LSP falls back to nREPL, rethrows when nREPL is empty', () => {
     const rejected = { status: 'rejected', reason: new Error('lsp down') };
     const out = core.mergeCompletionResults(rejected, mergeNrepl, mergeConvert);
-    assert.deepStrictEqual(out.map((i) => i.label), ['def', 'my_var']);
+    assert.deepStrictEqual(out.items.map((i) => i.label), ['def', 'my_var']);
+    assert.strictEqual(out.isIncomplete, true);
     assert.throws(() => core.mergeCompletionResults(rejected, [], mergeConvert), /lsp down/);
+});
+
+// Entries copied from lispython tests/test_dx.py (test_complete_items_wire_shape).
+const FILTERED_MY_V = { op: 'complete-result', word: 'MY_v', items: [{ label: 'my-var', filterText: 'MY_var', kind: 6 }] };
+const FILTERED_WHI = { op: 'complete-result', word: 'whi', items: [{ label: 'while', filterText: 'while', kind: 14, labelDetails: { description: 'special form' } }] };
+
+test('nreplCompletionItems: filterText passes through, distinct from the label', () => {
+    const [item] = core.nreplCompletionItems(FILTERED_MY_V);
+    assert.strictEqual(item.label, 'my-var');
+    assert.strictEqual(item.filterText, 'MY_var');
+    const [tagged] = core.nreplCompletionItems(FILTERED_WHI);
+    assert.strictEqual(tagged.filterText, 'while');
+    assert.strictEqual(tagged.description, 'special form');
 });
 
 test('mergeCompletionResults: nothing to add returns the LSP result untouched', () => {
