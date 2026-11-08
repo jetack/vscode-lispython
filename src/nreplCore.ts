@@ -6,6 +6,7 @@ import * as path from 'path';
 import * as crypto from 'crypto';
 import * as net from 'net';
 import { spawn, ChildProcess } from 'child_process';
+import { wordBoundaryRule } from './wordBoundaryRule';
 
 export const FALLBACK_COMPLETION_KIND: keyof typeof CompletionItemKind = 'Function';
 
@@ -739,14 +740,126 @@ export function linkifyErrors(text: string): string {
     return out + escapeHtml(text.slice(last));
 }
 
+export { wordBoundaryRule };
+export type WordBoundaryRule = ReturnType<typeof wordBoundaryRule>;
+
 /**
- * Start of the symbol that ends at `caret` in `text`: the walk back stops at whitespace, a
- * bracket, a quote or a comment char. The one boundary rule for editor and panel completion.
+ * The completion word around `caret` in `text` (UTF-16 offsets in and out), by lispython's
+ * published word boundary spec (`python -m lispy.word_boundary`, pinned in
+ * test/word-boundary.json): its `steps` are the algorithm below, its `rule` the tables in
+ * `rule`. `start` is where the typed prefix starts (dotted: `heapq.nl`), `replaceStart`
+ * after its last `.`, `end` at the next `.` or the token's end; `leafStart` is where the
+ * token's peeled front (`:`, `*`, leading signs) ends. A word that is empty at the caret
+ * (in a string opening, after `(`) has all four at `caret`. `\n` is a stop and a form-end
+ * character, so a multi-line text behaves as the caret's line.
+ * Injected into the webview, so self-contained: `rule` (wordBoundaryRule()) is a
+ * parameter because a call to an imported function does not survive toString in the
+ * unbundled build.
  */
-export function symbolPrefixStart(text: string, caret: number): number {
-    let start = caret;
-    while (start > 0 && !/[\s()[\]{}'`,;"]/.test(text[start - 1])) start--;
-    return start;
+export function completionWordSpan(text: string, caret: number, rule: WordBoundaryRule):
+    { start: number; replaceStart: number; end: number; leafStart: number } {
+    const isStop = (i: number) => i >= 0 && i < text.length && rule.stopChars.includes(text[i]);
+    const atFormEnd = (i: number) => i >= text.length || rule.formEndChars.includes(text[i]);
+    const longestFirst = (xs: string[]) => [...xs].sort((a, b) => b.length - a.length);
+    const combos = (heads: string[], tails: string[]) =>
+        longestFirst(heads.flatMap((h) => tails.map((t) => h + t)));
+    const escape = (s: string) => s.replace(/[\\^$.*+?()[\]{}|/]/g, '\\$&');
+    const sticky = (source: string) => new RegExp(source, 'uy');
+    const whole = (source: string) => new RegExp(`^(?:${source})$`, 'u');
+    const matchEnd = (re: RegExp, i: number) => {
+        re.lastIndex = i;
+        const m = re.exec(text);
+        return m === null ? -1 : i + m[0].length;
+    };
+
+    // The run: the stretch around the caret holding no stop character.
+    let runStart = caret;
+    while (runStart > 0 && !isStop(runStart - 1)) runStart--;
+    let runEnd = caret;
+    while (runEnd < text.length && !isStop(runEnd)) runEnd++;
+
+    // Lex from the run's start: each kind in the spec's order, its entries longest first.
+    const openings = combos(rule.wrappers, rule.openings);
+    const dangling = combos(rule.wrappers, rule.danglingQuotes);
+    const metas = combos(rule.wrappers, rule.metaChars);
+    const badTails = longestFirst([...rule.openings, ...rule.metaChars]);
+    const stringOpening = sticky(`${rule.stringPrefix}(?:${rule.stringOpenings.map(escape).join('|')})`);
+    const number = sticky(`(?:${rule.numberToken})(?![^${rule.formEndClass}])`);
+    const lexAt = (i: number): ['symbol' | 'number' | 'other', number] => {
+        const at = (entries: string[], ok: (end: number) => boolean) =>
+            entries.find((e) => text.startsWith(e, i) && ok(i + e.length));
+        const opening = at(openings, () => true);
+        if (opening !== undefined) return ['other', i + opening.length];
+        const stringEnd = matchEnd(stringOpening, i);
+        if (stringEnd >= 0) return ['other', stringEnd];
+        const quote = at(dangling, atFormEnd) ?? at(metas, (end) => !atFormEnd(end));
+        if (quote !== undefined) return ['other', i + quote.length];
+        // A bad prefix: ^ and one or more *, then an opening or meta entry, or before a stop.
+        if (text.startsWith('^*', i)) {
+            let j = i + 1;
+            while (text[j] === '*') j++;
+            const tail = badTails.find((e) => text.startsWith(e, j));
+            if (tail !== undefined) return ['other', j + tail.length];
+            if (j >= text.length || isStop(j)) return ['other', j];
+        }
+        const numberEnd = matchEnd(number, i);
+        if (numberEnd >= 0) return ['number', numberEnd];
+        return ['symbol', runEnd];
+    };
+    // The word token: the first that ends after the caret, or at it as a symbol or number.
+    let token: { start: number; end: number; isNumber: boolean } | undefined;
+    for (let i = runStart; i < runEnd;) {
+        const [kind, end] = lexAt(i);
+        if (end > caret || (end === caret && kind !== 'other')) {
+            if (kind !== 'other') token = { start: i, end, isNumber: kind === 'number' };
+            break;
+        }
+        i = end;
+    }
+    if (token === undefined) return { start: caret, replaceStart: caret, end: caret, leafStart: caret };
+
+    // Peel the token's front, repeatedly.
+    const numberWhole = whole(rule.numberToken);
+    const signedComplexWhole = whole(rule.signedComplex);
+    const alnum = sticky(rule.alnum);
+    let leafStart = token.start;
+    let isNumber = token.isNumber;
+    for (;;) {
+        const rest = text.slice(leafStart, token.end);
+        if (rule.neverPeeled.includes(rest)) break;
+        if (isNumber && (!rule.signs.some((s) => rest.startsWith(s)) || signedComplexWhole.test(rest))) break;
+        if ([...rest].length < 2) break;
+        const prefix = rule.tokenPrefixes.find((p) => rest.startsWith(p));
+        if (prefix !== undefined) {
+            leafStart += prefix.length;
+            if (numberWhole.test(text.slice(leafStart, token.end))) isNumber = true;
+            continue;
+        }
+        let signsEnd = leafStart;
+        for (let s; (s = rule.signs.find((x) => text.startsWith(x, signsEnd))) !== undefined;) signsEnd += s.length;
+        if (signsEnd > leafStart && signsEnd < token.end
+            && (matchEnd(alnum, signsEnd) >= 0 || rule.signPeelFollowers.some((f) => text.startsWith(f, signsEnd)))) {
+            leafStart = signsEnd;
+            continue;
+        }
+        break;
+    }
+
+    const start = caret < leafStart ? token.start : leafStart;
+    const dot = caret > start ? text.lastIndexOf('.', caret - 1) : -1;
+    const replaceStart = dot >= start ? dot + 1 : start;
+    const nextDot = text.indexOf('.', caret);
+    const end = nextDot >= 0 && nextDot < token.end ? nextDot : token.end;
+    return { start, replaceStart, end, leafStart };
+}
+
+/**
+ * Start of the completion prefix that ends at `caret` in `text`: completionWordSpan's
+ * dotted start (the nREPL server answers with `word` for the replace start, see
+ * nreplReplaceStart). The one boundary rule for editor and panel completion.
+ */
+export function symbolPrefixStart(text: string, caret: number, rule: WordBoundaryRule): number {
+    return completionWordSpan(text, caret, rule).start;
 }
 
 /**
@@ -988,7 +1101,7 @@ export function getReplHtml(
   function requestCompletion() {
     const caret = input.selectionStart;
     if (caret !== input.selectionEnd) return false;
-    const start = symbolPrefixStart(input.value, caret);
+    const start = symbolPrefixStart(input.value, caret, wordBoundaryRule());
     const prefix = input.value.slice(start, caret);
     if (prefix === '') return false;
     completionSeq += 1;
@@ -1074,6 +1187,10 @@ export function getReplHtml(
   ${injectWebviewFunction(escapeHtml, 'escapeHtml')}
 
   ${injectWebviewFunction(linkifyErrors, 'linkifyErrors')}
+
+  ${injectWebviewFunction(wordBoundaryRule, 'wordBoundaryRule')}
+
+  ${injectWebviewFunction(completionWordSpan, 'completionWordSpan')}
 
   ${injectWebviewFunction(symbolPrefixStart, 'symbolPrefixStart')}
 

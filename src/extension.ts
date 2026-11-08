@@ -14,7 +14,7 @@ import {
     NreplConnectCancelled, checkServerIdEcho, NreplConnection, evalMessage, completeMessage, macroexpandMessage, nreplRequestOn, openFileRefusedMessage, openFileWarning, resolveActiveFile,
     resolveOpenableFile, nreplFileOf,
     NreplServerSupervisor, panelCompleteMessage, panelEvalMessage, ReplScopeState, replScopeChoices,
-    replScopeView, symbolPrefixStart, mergeCompletionResults, nreplReplaceStart,
+    replScopeView, symbolPrefixStart, wordBoundaryRule, mergeCompletionResults, nreplReplaceStart,
 } from './nreplCore';
 
 let client: LanguageClient | undefined;
@@ -1062,7 +1062,7 @@ async function fetchNreplCompletions(
 ): Promise<{ items: NreplCompletionItem[]; range: vscode.Range } | undefined> {
     if (!nreplConnected()) return undefined;
     const lineText = document.lineAt(position.line).text;
-    const start = symbolPrefixStart(lineText, position.character);
+    const start = symbolPrefixStart(lineText, position.character, wordBoundaryRule());
     const prefix = lineText.slice(start, position.character);
     if (!prefix) return undefined;
     try {

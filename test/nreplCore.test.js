@@ -5,6 +5,7 @@ const os = require('os');
 const path = require('path');
 const net = require('net');
 const core = require('../out-test/nreplCore');
+const { findLispython } = require('./lispython');
 
 test('parsePortFile', () => {
     assert.strictEqual(core.parsePortFile('5555'), 5555);
@@ -330,6 +331,18 @@ webviewTest('webview: Tab completes the symbol before the caret', (core) => {
     assert.strictEqual(w.input.value, '(print');
     assert.strictEqual(w.els.candidates.hidden, false);
     assert.ok(w.els.candidates.textContent.includes('printf'));
+});
+
+webviewTest('webview: the injected symbolPrefixStart is the core one on every word boundary spec case', (core) => {
+    const vm = require('node:vm');
+    const w = loadReplWebview(core);
+    const spec = JSON.parse(fs.readFileSync(path.join(__dirname, 'word-boundary.json'), 'utf8'));
+    for (const c of spec.cases) {
+        const caret = [...c.text].slice(0, c.caret).join('').length;
+        const injected = vm.runInContext(
+            `symbolPrefixStart(${JSON.stringify(c.text)}, ${caret}, wordBoundaryRule())`, w.ctx);
+        assert.strictEqual(injected, core.symbolPrefixStart(c.text, caret, core.wordBoundaryRule()), JSON.stringify(c));
+    }
 });
 
 // `complete` replies captured from the real servers, verbatim. NEW_*: lispython's
@@ -1274,33 +1287,15 @@ test('ReplScopeState: answered requests mark their file scoped; a new connection
     assert.strictEqual(s.current, '/w/a.lpy');
 });
 
-test('symbolPrefixStart stops at brackets, quotes and whitespace; longestCommonPrefix keeps code points whole', () => {
-    const text = '(foo [bar.baz-q "s';
-    const prefixAt = (caret) => text.slice(core.symbolPrefixStart(text, caret), caret);
-    assert.strictEqual(prefixAt(4), 'foo');
-    assert.strictEqual(prefixAt(15), 'bar.baz-q');
-    assert.strictEqual(prefixAt(18), 's');
-    assert.strictEqual(prefixAt(16), '');
+test('longestCommonPrefix keeps code points whole', () => {
     assert.strictEqual(core.longestCommonPrefix(['a\u{1F600}', 'a\u{1F601}']), 'a');
 });
 
-/** lispython's tools.lpy: $LISPYTHON_DIR, else a `lispython` checkout beside the repo or any ancestor (worktrees nest). */
-function findLispythonTools() {
-    const rel = path.join('src', 'lispy', 'tools.lpy');
-    if (process.env.LISPYTHON_DIR) return path.join(process.env.LISPYTHON_DIR, rel);
-    let dir = path.resolve(__dirname, '..');
-    while (path.dirname(dir) !== dir) {
-        const candidate = path.join(path.dirname(dir), 'lispython', rel);
-        if (fs.existsSync(candidate)) return candidate;
-        dir = path.dirname(dir);
-    }
-    return undefined;
-}
-
 test('NREPL_NS_FIELD mirrors the field lispython reads for eval/complete/macroexpand scope', (t) => {
-    const tools = findLispythonTools();
-    if (tools === undefined || !fs.existsSync(tools)) return t.skip('lispython checkout not found; set LISPYTHON_DIR');
-    const src = fs.readFileSync(tools, 'utf8');
+    const toolsRel = path.join('src', 'lispy', 'tools.lpy');
+    const checkout = findLispython(toolsRel);
+    if (checkout === undefined) return t.skip('lispython checkout not found; set LISPYTHON_DIR');
+    const src = fs.readFileSync(path.join(checkout, toolsRel), 'utf8');
     // tools.lpy spells the field once, as NREPL-NS-FIELD; its value must equal ours.
     const constant = /^\(= NREPL-NS-FIELD "([^"]*)"\)/m.exec(src);
     assert.ok(constant, '(= NREPL-NS-FIELD "...") not found in tools.lpy');
