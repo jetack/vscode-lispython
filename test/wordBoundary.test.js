@@ -211,12 +211,16 @@ buildTest('VS Code finds the spec word of every spec case with the wordPattern',
     }
 });
 
-test('the wordPattern stays fast on long runs of signs', () => {
-    // A column inside a signs run must fail the regex's cheap guard: re-lexing the run
-    // there is quadratic per exec, and VS Code's 150 ms budget is checked only between them.
+test('the wordPattern stays fast on long runs of signs, leads and dots', () => {
+    // A column inside a signs run or a `....` stretch must fail the regex's cheap checks:
+    // re-lexing the run there is quadratic per exec, and VS Code's 150 ms budget is
+    // checked only between them.
     const core = require('../out-test/nreplCore');
     const rule = core.wordBoundaryRule();
-    const lines = ['x' + '-'.repeat(999), '-'.repeat(500) + '1'.repeat(499), '+-'.repeat(200) + 'ab', '-'.repeat(400)];
+    const lines = [
+        'x' + '-'.repeat(999), '-'.repeat(500) + '1'.repeat(499), '+-'.repeat(200) + 'ab', '-'.repeat(400),
+        '('.repeat(500) + '.'.repeat(499), "'".repeat(500) + '.'.repeat(499), '*'.repeat(500) + '.'.repeat(499),
+    ];
     for (const line of lines) {
         for (const caret of [line.length, line.length >> 1, line.length - 20, 1]) {
             const t0 = Date.now();
