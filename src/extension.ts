@@ -1085,6 +1085,7 @@ function toVscodeCompletionItems(items: NreplCompletionItem[], range: vscode.Ran
                 : entry.label,
             vscode.CompletionItemKind[entry.kind]);
         item.range = range;
+        if (entry.filterText !== undefined) item.filterText = entry.filterText;
         return item;
     });
 }
@@ -1094,10 +1095,18 @@ class NreplCompletionProvider implements vscode.CompletionItemProvider {
     async provideCompletionItems(
         document: vscode.TextDocument,
         position: vscode.Position,
-    ): Promise<vscode.CompletionItem[] | undefined> {
+    ): Promise<vscode.CompletionList | undefined> {
         if (client?.isRunning()) return undefined;
         const fetched = await fetchNreplCompletions(document, position);
-        return fetched && toVscodeCompletionItems(fetched.items, fetched.range);
+        if (!fetched) return undefined;
+        // Same rule as the LSP merge: nREPL items always come as an incomplete list.
+        const merged = mergeCompletionResults<vscode.CompletionItem>(
+            { status: 'fulfilled', value: undefined },
+            fetched.items,
+            (entry) => toVscodeCompletionItems([entry], fetched.range)[0]);
+        return merged && !Array.isArray(merged)
+            ? new vscode.CompletionList(merged.items, merged.isIncomplete)
+            : undefined;
     }
 }
 

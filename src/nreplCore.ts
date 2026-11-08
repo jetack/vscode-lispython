@@ -30,6 +30,8 @@ export type NreplCompletionItem = {
     label: string;
     kind: keyof typeof CompletionItemKind;
     description?: string;
+    /** What VS Code filters and sorts by: the typed word plus the rest of the label. Absent on older servers. */
+    filterText?: string;
 };
 
 /** Completion items of a `complete` response: the LSP-shaped `items` field only. */
@@ -49,6 +51,7 @@ export function nreplCompletionItems(result: Record<string, unknown>): NreplComp
             const description = (details as Record<string, unknown>).description;
             if (typeof description === 'string' && description !== '') item.description = description;
         }
+        if (typeof entry.filterText === 'string' && entry.filterText !== '') item.filterText = entry.filterText;
         out.push(item);
     }
     return out;
@@ -74,9 +77,11 @@ export type LspCompletionResult<T> = T[] | { items: T[]; isIncomplete?: boolean 
 
 /**
  * Merge the LSP outcome with the nREPL items: LSP items first, then the
- * runtime-only nREPL items converted by `convert`. The LSP result keeps its
- * shape (array stays array, list keeps isIncomplete). With nothing to add the
- * LSP result is returned as is; a rejected LSP with nothing to add rethrows.
+ * runtime-only nREPL items converted by `convert`. A result holding nREPL
+ * items is always a list with `isIncomplete: true`, because the nREPL answer is
+ * filtered for the exact word it was asked for and must be re-asked on every
+ * keystroke. With nothing to add the LSP result is returned as is; a rejected
+ * LSP with nothing to add rethrows.
  */
 export function mergeCompletionResults<T extends { label: string | { label: string } }>(
     lsp: PromiseSettledResult<LspCompletionResult<T>>,
@@ -90,11 +95,7 @@ export function mergeCompletionResults<T extends { label: string | { label: stri
         if (lsp.status === 'rejected') throw lsp.reason;
         return lspResult;
     }
-    const merged = [...lspItems, ...extra];
-    if (lspResult && !Array.isArray(lspResult)) {
-        return { items: merged, isIncomplete: lspResult.isIncomplete };
-    }
-    return merged;
+    return { items: [...lspItems, ...extra], isIncomplete: true };
 }
 
 /** The server writes bare decimal digits, no newline. */
