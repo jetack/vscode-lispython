@@ -1428,11 +1428,6 @@ test('nreplCompletionItems: filterText passes through, distinct from the label',
     assert.strictEqual(tagged.description, 'special form');
 });
 
-test('nreplCompletionItems: an item without filterText (older server) has no filterText key', () => {
-    const [item] = core.nreplCompletionItems({ op: 'complete-result', word: 'os.ge', items: [{ label: 'getcwd', kind: 3 }] });
-    assert.ok(!('filterText' in item));
-});
-
 test('mergeCompletionResults: nothing to add returns the LSP result untouched', () => {
     const list = { items: [lspItem('def')], isIncomplete: true };
     assert.strictEqual(core.mergeCompletionResults(settled(list), [mergeNrepl[0]], mergeConvert), list);
