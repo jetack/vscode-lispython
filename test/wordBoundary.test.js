@@ -546,7 +546,7 @@ test('test/word-boundary.json is what lispython publishes', (t) => {
         're-run `python -m lispy.word_boundary > test/word-boundary.json`, then `bun run word-boundary`');
 });
 
-test('src/wordBoundaryRule.ts and the wordPattern are generated from test/word-boundary.json', () => {
+test('src/wordBoundaryRule.ts, the wordPattern and package.json\'s editor.wordSeparators are generated from test/word-boundary.json', () => {
     const r = spawnSync(process.execPath, [path.join(ROOT, 'scripts', 'word-boundary.mjs'), '--check'], { encoding: 'utf8' });
     assert.strictEqual(r.status, 0, r.stderr);
 });

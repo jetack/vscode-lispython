@@ -290,10 +290,9 @@ const CLASSIFIED_BY_VSCODE = [' ', '\t', '\n', '\r'];
  * a token (stop chars, openings, meta chars, token prefixes), plus `.`, which splits the
  * leaf into its dotted segments (double-click selects the attribute, as in Python). The
  * signs are no separators, so `->f`, `as->` and `swap!` stay whole. What one class per
- * character cannot express: the peeled sign front (`-fo`'s word is `fo`), a meta char or
- * prefix inside a symbol (`a~b`, `except*`), a string prefix's word (`a"`), and the
- * completion word across a dotted path (`heapq.nl`). test/wordBoundary.test.js lists
- * every spec case where they diverge.
+ * character cannot express: sign peeling, a meta char or prefix inside a symbol, a string
+ * prefix's word, and the completion word across a dotted path. SEPARATOR_DIVERGENCES in
+ * test/wordBoundary.test.js lists the spec cases of each.
  */
 function wordSeparators(rule) {
     const chars = [
