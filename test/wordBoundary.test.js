@@ -246,6 +246,173 @@ test('the wordPattern finds a word whose run starts more than 15 columns back', 
     }
 });
 
+// --- VS Code's word selection (editor.wordSeparators) --------------------------------
+
+// Ported from VS Code 1.82.0: src/vs/editor/common/core/wordCharacterClassifier.ts
+// (WordCharacterClassifier) and src/vs/editor/common/cursor/cursorWordOperations.ts
+// (WordOperations.word, not in selection mode, with _doFindPreviousWordOnLine,
+// _doFindNextWordOnLine, _findEndOfWord, _findStartOfWord), types and the model dropped.
+const WordCharacterClass = { Regular: 0, Whitespace: 1, WordSeparator: 2 };
+const WordType = { None: 0, Regular: 1, Separator: 2 };
+
+function wordCharacterClassifier(wordSeparators) {
+    const classes = new Map();
+    for (let i = 0, len = wordSeparators.length; i < len; i++) {
+        classes.set(wordSeparators.charCodeAt(i), WordCharacterClass.WordSeparator);
+    }
+    classes.set(32, WordCharacterClass.Whitespace);
+    classes.set(9, WordCharacterClass.Whitespace);
+    return { get: (chCode) => classes.get(chCode) ?? WordCharacterClass.Regular };
+}
+
+function findEndOfWord(lineContent, wordSeparators, wordType, startIndex) {
+    const len = lineContent.length;
+    for (let chIndex = startIndex; chIndex < len; chIndex++) {
+        const chClass = wordSeparators.get(lineContent.charCodeAt(chIndex));
+        if (chClass === WordCharacterClass.Whitespace) return chIndex;
+        if (wordType === WordType.Regular && chClass === WordCharacterClass.WordSeparator) return chIndex;
+        if (wordType === WordType.Separator && chClass === WordCharacterClass.Regular) return chIndex;
+    }
+    return len;
+}
+
+function findStartOfWord(lineContent, wordSeparators, wordType, startIndex) {
+    for (let chIndex = startIndex; chIndex >= 0; chIndex--) {
+        const chClass = wordSeparators.get(lineContent.charCodeAt(chIndex));
+        if (chClass === WordCharacterClass.Whitespace) return chIndex + 1;
+        if (wordType === WordType.Regular && chClass === WordCharacterClass.WordSeparator) return chIndex + 1;
+        if (wordType === WordType.Separator && chClass === WordCharacterClass.Regular) return chIndex + 1;
+    }
+    return 0;
+}
+
+function findPreviousWordOnLine(lineContent, wordSeparators, column) {
+    let wordType = WordType.None;
+    for (let chIndex = column - 2; chIndex >= 0; chIndex--) {
+        const chClass = wordSeparators.get(lineContent.charCodeAt(chIndex));
+        if (chClass === WordCharacterClass.Regular) {
+            if (wordType === WordType.Separator) {
+                return { wordType, start: chIndex + 1, end: findEndOfWord(lineContent, wordSeparators, wordType, chIndex + 1) };
+            }
+            wordType = WordType.Regular;
+        } else if (chClass === WordCharacterClass.WordSeparator) {
+            if (wordType === WordType.Regular) {
+                return { wordType, start: chIndex + 1, end: findEndOfWord(lineContent, wordSeparators, wordType, chIndex + 1) };
+            }
+            wordType = WordType.Separator;
+        } else if (chClass === WordCharacterClass.Whitespace) {
+            if (wordType !== WordType.None) {
+                return { wordType, start: chIndex + 1, end: findEndOfWord(lineContent, wordSeparators, wordType, chIndex + 1) };
+            }
+        }
+    }
+    if (wordType !== WordType.None) {
+        return { wordType, start: 0, end: findEndOfWord(lineContent, wordSeparators, wordType, 0) };
+    }
+    return null;
+}
+
+function findNextWordOnLine(lineContent, wordSeparators, column) {
+    let wordType = WordType.None;
+    const len = lineContent.length;
+    for (let chIndex = column - 1; chIndex < len; chIndex++) {
+        const chClass = wordSeparators.get(lineContent.charCodeAt(chIndex));
+        if (chClass === WordCharacterClass.Regular) {
+            if (wordType === WordType.Separator) {
+                return { wordType, start: findStartOfWord(lineContent, wordSeparators, wordType, chIndex - 1), end: chIndex };
+            }
+            wordType = WordType.Regular;
+        } else if (chClass === WordCharacterClass.WordSeparator) {
+            if (wordType === WordType.Regular) {
+                return { wordType, start: findStartOfWord(lineContent, wordSeparators, wordType, chIndex - 1), end: chIndex };
+            }
+            wordType = WordType.Separator;
+        } else if (chClass === WordCharacterClass.Whitespace) {
+            if (wordType !== WordType.None) {
+                return { wordType, start: findStartOfWord(lineContent, wordSeparators, wordType, chIndex - 1), end: chIndex };
+            }
+        }
+    }
+    if (wordType !== WordType.None) {
+        return { wordType, start: findStartOfWord(lineContent, wordSeparators, wordType, len - 1), end: len };
+    }
+    return null;
+}
+
+/** The selection double-click makes at UTF-16 offset `caret` of the one-line `text`, as [start, end]. */
+function doubleClickWord(text, caret, separators) {
+    const wordSeparators = wordCharacterClassifier(separators);
+    const column = caret + 1;
+    const prevWord = findPreviousWordOnLine(text, wordSeparators, column);
+    const nextWord = findNextWordOnLine(text, wordSeparators, column);
+    let startColumn;
+    let endColumn;
+    if (prevWord && prevWord.wordType === WordType.Regular && prevWord.start <= column - 1 && column - 1 <= prevWord.end) {
+        startColumn = prevWord.start + 1;
+        endColumn = prevWord.end + 1;
+    } else if (nextWord && nextWord.wordType === WordType.Regular && nextWord.start <= column - 1 && column - 1 <= nextWord.end) {
+        startColumn = nextWord.start + 1;
+        endColumn = nextWord.end + 1;
+    } else {
+        startColumn = prevWord ? prevWord.end + 1 : 1;
+        endColumn = nextWord ? nextWord.start + 1 : text.length + 1;
+    }
+    // new Range(...) swaps a start past the end (`*|*x`: prev ends after next starts).
+    return [Math.min(startColumn, endColumn) - 1, Math.max(startColumn, endColumn) - 1];
+}
+
+// VS Code 1.82's default (src/vs/editor/common/core/wordHelper.ts USUAL_WORD_SEPARATORS),
+// what the editor uses when package.json sets none: the test then fails on content.
+const VSCODE_DEFAULT_SEPARATORS = '`~!@#$%^&*()-=+[{]}\\|;:\'",.<>/?';
+
+function lispythonWordSeparators() {
+    const pkg = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8'));
+    return pkg.contributes.configurationDefaults['[lispython]']['editor.wordSeparators'] ?? VSCODE_DEFAULT_SEPARATORS;
+}
+
+// Spec cases (text, caret in code points) where one class per character cannot give the
+// spec's start..end, by reason. Anything else that differs fails the test, and so does an
+// entry here that stops differing.
+const SEPARATOR_DIVERGENCES = {
+    // A sign is no separator (or `->f` and `swap!` would split), so the front stays on.
+    'a peeled sign front is outside the spec word': [
+        ['-fo', 3], ['--x', 3], ['(- -fo', 6], ['-.x', 3], ['-_a', 3], ['-²', 2], ['-1', 2], ['-foo', 1],
+    ],
+    // Intended: double-click selects the attribute, as in Python.
+    'a dotted path is one completion word, but `.` separates for selection': [
+        ['heapq.nl', 8], ['heapq.', 6], ['a.b.c', 3], ['a..b', 4], ['x.', 2], ['.method', 7], ['(.c', 3],
+        ['x .c', 4], ['1.5', 3],
+    ],
+    'the spec word at a string stops at its quote, which no class can say': [
+        ['a"', 1], ['f"x"', 1], ['한"', 1], ['"ab"', 3],
+    ],
+    'a meta char, prefix or opening is a separator even where it is part of a symbol': [
+        ['a~b', 3], ['a@b', 3], ['a(b', 3], ["a'b", 3], ['except*', 7], ['**x', 1], ['**=', 3], ['^**=', 4],
+        ['~', 1], ['~@x', 1], ['*[1 2]', 1],
+    ],
+};
+
+test('double-click with the [lispython] editor.wordSeparators selects the spec word', () => {
+    const separators = lispythonWordSeparators();
+    const known = new Map();
+    for (const [reason, cases] of Object.entries(SEPARATOR_DIVERGENCES)) {
+        for (const [text, caret] of cases) known.set(JSON.stringify([text, caret]), reason);
+    }
+    const wrong = [];
+    const diverged = new Set();
+    for (const spec of SPEC.cases) {
+        const c = utf16Case(spec);
+        const got = doubleClickWord(c.text, c.caret, separators);
+        const id = JSON.stringify([spec.text, spec.caret]);
+        const differs = JSON.stringify(got) !== JSON.stringify([c.start, c.end]);
+        if (differs && known.has(id)) diverged.add(id);
+        else if (differs) wrong.push(`${show(c.text, c.caret)}: ${JSON.stringify(got)}, want ${JSON.stringify([c.start, c.end])}`);
+    }
+    const stale = [...known.keys()].filter((id) => !diverged.has(id));
+    assert.deepStrictEqual(wrong, [], 'spec cases the separators get wrong');
+    assert.deepStrictEqual(stale, [], 'listed divergences that are not (or no longer) spec cases that differ');
+});
+
 // --- fuzz ----------------------------------------------------------------------------
 
 /** A seeded PRNG (mulberry32), so the corpus is the same on every run. */

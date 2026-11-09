@@ -5,6 +5,7 @@ Language support for [LisPython](https://github.com/jetack/lispython) (`.lpy`) �
 ## Features
 
 - **Syntax highlighting** — full TextMate grammar covering special forms, operators, strings, f-strings, macros, and keywords
+- **Word selection** — double-click, `Ctrl+Left`/`Right`, `Ctrl+Backspace` and whole-word find treat LisPython symbols such as `swap!`, `ok?` and `->foo` as one word (a default for the `[lispython]` `editor.wordSeparators`)
 - **Bracket matching** and rainbow parens (via VS Code's built-in bracket pair colorization)
 - **Language server** powered by [lpy-lsp](https://github.com/jetack/lispython):
   - **Diagnostics** — parse and compile errors reported inline
