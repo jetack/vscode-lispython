@@ -711,6 +711,14 @@ export function injectWebviewFunction(fn: Function, name: string): string {
     return declared === name ? src : `${src}\nconst ${name} = ${declared};`;
 }
 
+export interface ReplPanelResult { value?: string | null; stdout?: string; stderr?: string; error?: string | null }
+
+/** The one place that picks the reply fields the REPL webview renders; a new field is an edit here and in the webview script. */
+export function replPanelResult(reply: ReplPanelResult): ReplPanelResult {
+    const { value, stdout, stderr, error } = reply;
+    return { value, stdout, stderr, error };
+}
+
 /** Escapes text for both element content and double/single-quoted attribute values. */
 export function escapeHtml(s: string): string {
     return s
@@ -1026,6 +1034,7 @@ export function getReplHtml(
   .prompt { color: var(--vscode-descriptionForeground); }
   .value { color: var(--vscode-debugTokenExpression-number); white-space: pre-wrap; }
   .stdout { color: var(--vscode-terminal-ansiGreen); white-space: pre-wrap; }
+  .stderr { color: var(--vscode-terminal-ansiYellow); white-space: pre-wrap; }
   .error { color: var(--vscode-errorForeground); white-space: pre-wrap; }
   .file-link { color: var(--vscode-textLink-foreground); cursor: pointer; text-decoration: underline; }
   .file-link:hover { color: var(--vscode-textLink-activeForeground); }
@@ -1172,6 +1181,9 @@ export function getReplHtml(
 
     if (result.stdout) {
       html += '<br><span class="stdout">' + escapeHtml(result.stdout.replace(/\\n$/, '')) + '</span>';
+    }
+    if (result.stderr) {
+      html += '<br><span class="stderr">' + escapeHtml(result.stderr.replace(/\\n$/, '')) + '</span>';
     }
     if (result.error) {
       html += '<br><span class="error">' + linkifyErrors(result.error) + '</span>';
