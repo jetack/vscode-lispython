@@ -279,6 +279,17 @@ webviewTest('injected escapeHtml/linkifyErrors work inside the webview script', 
     assert.ok(w.els.entries.children.at(-1).innerHTML.startsWith('<span class="prompt">&lt;i&gt;.lpy&gt; </span>'));
 });
 
+webviewTest('webview renders stderr escaped between stdout and the value', (core) => {
+    const w = loadReplWebview(core);
+    w.send({ type: 'eval', code: '1', result: { value: '1', stdout: 'out\n', stderr: '<w>\n' } });
+    const html = w.els.entries.children.at(-1).innerHTML;
+    assert.ok(html.includes('<span class="stderr">&lt;w&gt;</span>'), 'stderr escaped, trailing newline stripped');
+    assert.ok(html.indexOf('class="stdout"') < html.indexOf('class="stderr"'));
+    assert.ok(html.indexOf('class="stderr"') < html.indexOf('class="value"'));
+    w.send({ type: 'eval', code: '1', result: { value: '1' } });
+    assert.ok(!w.els.entries.children.at(-1).innerHTML.includes('stderr'));
+});
+
 webviewTest('webview input: Enter posts eval, Shift+Enter and a blank input post nothing', (core) => {
     const w = loadReplWebview(core);
     w.type('(+ 1\n 2)');

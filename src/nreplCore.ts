@@ -1026,6 +1026,7 @@ export function getReplHtml(
   .prompt { color: var(--vscode-descriptionForeground); }
   .value { color: var(--vscode-debugTokenExpression-number); white-space: pre-wrap; }
   .stdout { color: var(--vscode-terminal-ansiGreen); white-space: pre-wrap; }
+  .stderr { color: var(--vscode-terminal-ansiYellow); white-space: pre-wrap; }
   .error { color: var(--vscode-errorForeground); white-space: pre-wrap; }
   .file-link { color: var(--vscode-textLink-foreground); cursor: pointer; text-decoration: underline; }
   .file-link:hover { color: var(--vscode-textLink-activeForeground); }
@@ -1172,6 +1173,9 @@ export function getReplHtml(
 
     if (result.stdout) {
       html += '<br><span class="stdout">' + escapeHtml(result.stdout.replace(/\\n$/, '')) + '</span>';
+    }
+    if (result.stderr) {
+      html += '<br><span class="stderr">' + escapeHtml(result.stderr.replace(/\\n$/, '')) + '</span>';
     }
     if (result.error) {
       html += '<br><span class="error">' + linkifyErrors(result.error) + '</span>';

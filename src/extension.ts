@@ -685,12 +685,18 @@ function workspaceFileRoots(): string[] {
         .map((f) => f.uri.fsPath);
 }
 
-/** `prompt` names the scope of a panel-typed entry; editor-originated entries leave it out and show `repl`. */
+/**
+ * `prompt` names the scope of a panel-typed entry; editor-originated entries leave it out and show `repl`.
+ * Callers pass the whole nREPL reply (or an override of it); this is the one place that picks the
+ * fields the webview renders, so a new reply field is one edit here and one in the webview script.
+ */
 function appendToReplPanel(
     code: string,
-    result: { value?: string | null; stdout?: string; error?: string | null },
+    reply: { value?: string | null; stdout?: string; stderr?: string; error?: string | null },
     prompt?: string,
 ): void {
+    const { value, stdout, stderr, error } = reply;
+    const result = { value, stdout, stderr, error };
     const panel = getOrCreateReplPanel();
     panel.webview.postMessage(prompt === undefined ? { type: 'eval', code, result } : { type: 'eval', code, result, prompt });
 }
@@ -715,7 +721,7 @@ async function evalFromPanel(code: string): Promise<void> {
     }
     try {
         const result = await nreplRequest(panelEvalMessage(code, scope));
-        appendToReplPanel(code, { value: result.value, stdout: result.stdout, error: result.error }, prompt);
+        appendToReplPanel(code, result, prompt);
     } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         appendToReplPanel(code, { error: `nREPL eval failed: ${msg}` }, prompt);
@@ -899,7 +905,7 @@ async function connectNreplFromPortFile(): Promise<void> {
     }
 }
 
-function nreplEval(code: string, doc: vscode.TextDocument, range: [number, number]): Promise<{ value?: string; stdout?: string; error?: string }> {
+function nreplEval(code: string, doc: vscode.TextDocument, range: [number, number]): Promise<{ value?: string; stdout?: string; stderr?: string; error?: string }> {
     return nreplRequest(evalMessage(code, doc, range));
 }
 
@@ -926,8 +932,10 @@ async function evalAndShow(code: string, editor: vscode.TextEditor, range: [numb
             parts.push(`Error: ${result.error}`);
         } else if (result.value && result.value !== 'None') {
             parts.push(result.value);
-        } else if (result.stdout) {
+        } else if (result.stdout?.trim()) {
             parts.push(result.stdout.trimEnd());
+        } else if (result.stderr?.trim()) {
+            parts.push(result.stderr.trimEnd());
         }
 
         if (parts.length > 0) {
@@ -995,11 +1003,7 @@ async function loadFileToRepl(): Promise<void> {
 
     try {
         const result = await nreplRequest({ op: 'load-file', path: filePath });
-        appendToReplPanel(`(load-file "${path.basename(filePath)}")`, {
-            value: result.value,
-            stdout: result.stdout,
-            error: result.error,
-        });
+        appendToReplPanel(`(load-file "${path.basename(filePath)}")`, result);
     } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         vscode.window.showErrorMessage(`nREPL load-file failed: ${msg}`);
