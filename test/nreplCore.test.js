@@ -1337,6 +1337,18 @@ test('NREPL_NS_FIELD mirrors the field lispython reads for eval/complete/macroex
     }
 });
 
+test('NREPL_STDOUT_FIELD / NREPL_STDERR_FIELD mirror the reply fields lispython captures output under', (t) => {
+    const toolsRel = path.join('src', 'lispy', 'tools.lpy');
+    const checkout = findLispython(toolsRel);
+    if (checkout === undefined) return t.skip('lispython checkout not found; set LISPYTHON_DIR');
+    const src = fs.readFileSync(path.join(checkout, toolsRel), 'utf8');
+    for (const [name, ours] of [['NREPL-STDOUT-FIELD', core.NREPL_STDOUT_FIELD], ['NREPL-STDERR-FIELD', core.NREPL_STDERR_FIELD]]) {
+        const constant = new RegExp(`^\\(= ${name} "([^"]*)"\\)`, 'm').exec(src);
+        assert.ok(constant, `(= ${name} "...") not found in tools.lpy`);
+        assert.strictEqual(constant[1], ours, name);
+    }
+});
+
 test('lspCompletionKindName maps 1-based LSP kinds to VS Code names', () => {
     const k = core.lspCompletionKindName;
     assert.strictEqual(k(1), 'Text');
