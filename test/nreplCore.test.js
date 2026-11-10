@@ -1307,10 +1307,17 @@ test('NREPL_NS_FIELD mirrors the field lispython reads for eval/complete/macroex
     assert.ok(def[0].includes('(in NREPL-NS-FIELD fields)'), def[0]);
     assert.ok(!def[0].includes(`"${core.NREPL_NS_FIELD}"`), def[0]);
     for (const op of ['eval', 'complete', 'macroexpand']) {
-        const at = src.indexOf(`(== op "${op}")`);
-        assert.ok(at >= 0, `dispatch for ${op} not found`);
-        const fields = /_nrepl-request-scope msg (\[[^\]]*\])/.exec(src.slice(at))[1];
-        assert.strictEqual(fields, '["file" NREPL-NS-FIELD]', op);
+        // A dispatch branch tests the op literal or a named constant bound to it (NREPL-EVAL-OP).
+        const named = new RegExp(`^\\(= ([A-Z-]+) "${op}"\\)`, 'm').exec(src);
+        // Take the earliest occurrence across both spellings: the dispatch precedes any later stray mention.
+        const at = Math.min(...[`(== op "${op}")`, ...(named ? [`(== op ${named[1]})`] : [])]
+            .map((spelling) => src.indexOf(spelling)).filter((i) => i >= 0));
+        assert.ok(Number.isFinite(at), `dispatch for ${op} not found`);
+        // Bound the window to this op's own cond branch: a branch that lost its call must not borrow the next one's.
+        const next = src.indexOf('(== op ', at + 1);
+        const scope = /_nrepl-request-scope msg (\[[^\]]*\])/.exec(src.slice(at, next < 0 ? src.length : next));
+        assert.ok(scope, `no _nrepl-request-scope call after the ${op} dispatch`);
+        assert.strictEqual(scope[1], '["file" NREPL-NS-FIELD]', op);
     }
 });
 
