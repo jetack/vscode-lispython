@@ -14,7 +14,7 @@ import {
     NreplConnectCancelled, checkServerIdEcho, NreplConnection, evalMessage, completeMessage, macroexpandMessage, nreplRequestOn, openFileRefusedMessage, openFileWarning, resolveActiveFile,
     resolveOpenableFile, nreplFileOf,
     NreplServerSupervisor, panelCompleteMessage, panelEvalMessage, ReplScopeState, replScopeChoices,
-    replPanelResult, type ReplPanelResult, replScopeView, symbolPrefixStart, wordBoundaryRule, mergeCompletionResults, nreplReplaceStart,
+    replPanelResult, type ReplPanelResult, NREPL_STDOUT_FIELD, NREPL_STDERR_FIELD, replScopeView, symbolPrefixStart, wordBoundaryRule, mergeCompletionResults, nreplReplaceStart,
 } from './nreplCore';
 
 let client: LanguageClient | undefined;
@@ -904,7 +904,7 @@ async function connectNreplFromPortFile(): Promise<void> {
     }
 }
 
-function nreplEval(code: string, doc: vscode.TextDocument, range: [number, number]): Promise<{ value?: string; stdout?: string; stderr?: string; error?: string }> {
+function nreplEval(code: string, doc: vscode.TextDocument, range: [number, number]): Promise<ReplPanelResult> {
     return nreplRequest(evalMessage(code, doc, range));
 }
 
@@ -931,10 +931,10 @@ async function evalAndShow(code: string, editor: vscode.TextEditor, range: [numb
             parts.push(`Error: ${result.error}`);
         } else if (result.value && result.value !== 'None') {
             parts.push(result.value);
-        } else if (result.stdout?.trim()) {
-            parts.push(result.stdout.trimEnd());
-        } else if (result.stderr?.trim()) {
-            parts.push(result.stderr.trimEnd());
+        } else if (result[NREPL_STDOUT_FIELD]?.trim()) {
+            parts.push(result[NREPL_STDOUT_FIELD].trimEnd());
+        } else if (result[NREPL_STDERR_FIELD]?.trim()) {
+            parts.push(result[NREPL_STDERR_FIELD].trimEnd());
         }
 
         if (parts.length > 0) {
