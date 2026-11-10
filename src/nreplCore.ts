@@ -711,6 +711,14 @@ export function injectWebviewFunction(fn: Function, name: string): string {
     return declared === name ? src : `${src}\nconst ${name} = ${declared};`;
 }
 
+export interface ReplPanelResult { value?: string | null; stdout?: string; stderr?: string; error?: string | null }
+
+/** The one place that picks the reply fields the REPL webview renders; a new field is an edit here and in the webview script. */
+export function replPanelResult(reply: ReplPanelResult): ReplPanelResult {
+    const { value, stdout, stderr, error } = reply;
+    return { value, stdout, stderr, error };
+}
+
 /** Escapes text for both element content and double/single-quoted attribute values. */
 export function escapeHtml(s: string): string {
     return s

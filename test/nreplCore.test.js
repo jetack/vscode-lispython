@@ -279,6 +279,11 @@ webviewTest('injected escapeHtml/linkifyErrors work inside the webview script', 
     assert.ok(w.els.entries.children.at(-1).innerHTML.startsWith('<span class="prompt">&lt;i&gt;.lpy&gt; </span>'));
 });
 
+test('replPanelResult forwards every field the webview renders, stderr included', () => {
+    const r = core.replPanelResult({ id: '1', status: ['done'], value: 'v', stdout: 'o', stderr: 'NREPL-CAPTURE-CAP', error: 'e' });
+    assert.deepStrictEqual(r, { value: 'v', stdout: 'o', stderr: 'NREPL-CAPTURE-CAP', error: 'e' });
+});
+
 webviewTest('webview renders stderr escaped between stdout and the value', (core) => {
     const w = loadReplWebview(core);
     w.send({ type: 'eval', code: '1', result: { value: '1', stdout: 'out\n', stderr: '<w>\n' } });

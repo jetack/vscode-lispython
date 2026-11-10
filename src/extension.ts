@@ -14,7 +14,7 @@ import {
     NreplConnectCancelled, checkServerIdEcho, NreplConnection, evalMessage, completeMessage, macroexpandMessage, nreplRequestOn, openFileRefusedMessage, openFileWarning, resolveActiveFile,
     resolveOpenableFile, nreplFileOf,
     NreplServerSupervisor, panelCompleteMessage, panelEvalMessage, ReplScopeState, replScopeChoices,
-    replScopeView, symbolPrefixStart, wordBoundaryRule, mergeCompletionResults, nreplReplaceStart,
+    replPanelResult, type ReplPanelResult, replScopeView, symbolPrefixStart, wordBoundaryRule, mergeCompletionResults, nreplReplaceStart,
 } from './nreplCore';
 
 let client: LanguageClient | undefined;
@@ -692,11 +692,10 @@ function workspaceFileRoots(): string[] {
  */
 function appendToReplPanel(
     code: string,
-    reply: { value?: string | null; stdout?: string; stderr?: string; error?: string | null },
+    reply: ReplPanelResult,
     prompt?: string,
 ): void {
-    const { value, stdout, stderr, error } = reply;
-    const result = { value, stdout, stderr, error };
+    const result = replPanelResult(reply);
     const panel = getOrCreateReplPanel();
     panel.webview.postMessage(prompt === undefined ? { type: 'eval', code, result } : { type: 'eval', code, result, prompt });
 }
