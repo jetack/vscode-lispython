@@ -411,6 +411,10 @@ export function evalMessage(
  */
 export const NREPL_NS_FIELD = 'ns';
 
+/** Reply fields carrying captured stdout/stderr text. Other side: lispython tools.lpy NREPL-STDOUT-FIELD / NREPL-STDERR-FIELD. */
+export const NREPL_STDOUT_FIELD = 'stdout';
+export const NREPL_STDERR_FIELD = 'stderr';
+
 /** The REPL panel's scope: an absolute file path (as nreplFileOf spells it), or undefined for the session scope. */
 export type ReplScope = string | undefined;
 
@@ -711,12 +715,17 @@ export function injectWebviewFunction(fn: Function, name: string): string {
     return declared === name ? src : `${src}\nconst ${name} = ${declared};`;
 }
 
-export interface ReplPanelResult { value?: string | null; stdout?: string; stderr?: string; error?: string | null }
+export interface ReplPanelResult {
+    value?: string | null;
+    [NREPL_STDOUT_FIELD]?: string;
+    [NREPL_STDERR_FIELD]?: string;
+    error?: string | null;
+}
 
 /** The one place that picks the reply fields the REPL webview renders; a new field is an edit here and in the webview script. */
 export function replPanelResult(reply: ReplPanelResult): ReplPanelResult {
-    const { value, stdout, stderr, error } = reply;
-    return { value, stdout, stderr, error };
+    const { value, error } = reply;
+    return { value, [NREPL_STDOUT_FIELD]: reply[NREPL_STDOUT_FIELD], [NREPL_STDERR_FIELD]: reply[NREPL_STDERR_FIELD], error };
 }
 
 /** Escapes text for both element content and double/single-quoted attribute values. */
@@ -1179,11 +1188,13 @@ export function getReplHtml(
 
     let html = '<span class="prompt">' + escapeHtml(prompt) + '&gt; </span><span class="code">' + escapeHtml(code) + '</span>';
 
-    if (result.stdout) {
-      html += '<br><span class="stdout">' + escapeHtml(result.stdout.replace(/\\n$/, '')) + '</span>';
+    const stdoutText = result[${scriptLiteral(NREPL_STDOUT_FIELD)}];
+    const stderrText = result[${scriptLiteral(NREPL_STDERR_FIELD)}];
+    if (stdoutText) {
+      html += '<br><span class="stdout">' + escapeHtml(stdoutText.replace(/\\n$/, '')) + '</span>';
     }
-    if (result.stderr) {
-      html += '<br><span class="stderr">' + escapeHtml(result.stderr.replace(/\\n$/, '')) + '</span>';
+    if (stderrText) {
+      html += '<br><span class="stderr">' + escapeHtml(stderrText.replace(/\\n$/, '')) + '</span>';
     }
     if (result.error) {
       html += '<br><span class="error">' + linkifyErrors(result.error) + '</span>';
