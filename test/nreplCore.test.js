@@ -1307,7 +1307,10 @@ test('NREPL_NS_FIELD mirrors the field lispython reads for eval/complete/macroex
     assert.ok(def[0].includes('(in NREPL-NS-FIELD fields)'), def[0]);
     assert.ok(!def[0].includes(`"${core.NREPL_NS_FIELD}"`), def[0]);
     for (const op of ['eval', 'complete', 'macroexpand']) {
-        const at = src.indexOf(`(== op "${op}")`);
+        // A dispatch branch tests the op literal or a named constant bound to it (NREPL-EVAL-OP).
+        const named = new RegExp(`^\\(= ([A-Z-]+) "${op}"\\)`, 'm').exec(src);
+        const at = [`(== op "${op}")`, ...(named ? [`(== op ${named[1]})`] : [])]
+            .map((spelling) => src.indexOf(spelling)).find((i) => i >= 0) ?? -1;
         assert.ok(at >= 0, `dispatch for ${op} not found`);
         const fields = /_nrepl-request-scope msg (\[[^\]]*\])/.exec(src.slice(at))[1];
         assert.strictEqual(fields, '["file" NREPL-NS-FIELD]', op);
