@@ -30,7 +30,7 @@ const GENERATED = `${GENERATED_BY} from test/word-boundary.json; do not edit`;
 
 // The steps completionWordSpan and the wordPattern below implement are this version's.
 // A new version may change the steps' prose, so it fails here until both are reviewed.
-const SPEC_VERSION = 3;
+const SPEC_VERSION = 4;
 
 // --- Python re (over str) to JS (u flag) ---------------------------------------------
 
@@ -142,12 +142,15 @@ function readSpec() {
 function jsRule(rule) {
     const stopChars = rule.stopChars.join('');
     const formEndChars = rule.formEndChars.join('');
+    const numberEndChars = rule.numberEndChars.join('');
     for (const c of rule.stopChars) if (c.codePointAt(0) > 0xffff) throw new Error('an astral stop char: the UTF-16 walk assumes BMP');
     return {
         stopChars,
         formEndChars,
+        numberEndChars,
         stopClass: classBody(rule.stopChars),
         formEndClass: classBody(rule.formEndChars),
+        numberEndClass: classBody(rule.numberEndChars),
         alnum: `[${ALNUM_CLASS_BODY}]`,
         wrappers: byLengthDesc(rule.wrappers),
         openings: byLengthDesc(rule.openings),
@@ -188,9 +191,11 @@ function jsRule(rule) {
 function wordPattern(rule, js) {
     const S = js.stopClass;
     const F = js.formEndClass;
+    const N = js.numberEndClass;
     const notStop = `[^${S}]`;
     const atRunEnd = `(?!${notStop})`; // next is a stop char or the line's end
     const atFormEnd = `(?![^${F}])`; // next is a formEndChars char or the line's end
+    const atNumberEnd = `(?![^${N}])`; // next is a numberEndChars char or the line's end
     const beforeNonFormEnd = `(?=[^${F}])`; // next is a character, not a formEndChars one
     const hasStop = (s) => [...s].some((c) => rule.stopChars.includes(c));
 
@@ -210,6 +215,9 @@ function wordPattern(rule, js) {
     // position, and stop-free, since a token holding a stop char reaches the run's end.
     // A dangling quote is followed by a formEndChars char, a stop char: never a lead.
     for (const c of rule.formEndChars) if (!rule.stopChars.includes(c)) throw new Error(`formEnd ${c} is not a stop char`);
+    // A number token ends before a numberEndChars char, so it reaches its run's end only
+    // while each of them is a stop char.
+    for (const c of rule.numberEndChars) if (!rule.stopChars.includes(c)) throw new Error(`numberEnd ${c} is not a stop char`);
     const firstOfNoStop = (entries, tail) => firstOf(entries, tail, (e) => !hasStop(e));
     const leads = [
         firstOfNoStop(openings, ''),
@@ -225,7 +233,7 @@ function wordPattern(rule, js) {
     const LONG = `(?=${notStop}{2})`; // at least 2 code points
     const PREFIX_STEP = `(?!${NEVER})${LONG}${firstOf(js.tokenPrefixes)}`;
     const SC_WHOLE = `(?:${js.signedComplex})${atRunEnd}`;
-    const NUM_AT_WORD_START = `(?:${js.numberToken})${atFormEnd}`; // the lexer's number test
+    const NUM_AT_WORD_START = `(?:${js.numberToken})${atNumberEnd}`; // the lexer's number test
     const NUM_WHOLE = `(?:${js.numberToken})${atRunEnd}`; // the type after a prefix peel
     const followers = alt([js.alnum, ...js.signPeelFollowers.map(literal)]);
     // A number whose signs are peeled starts with a sign, so only signedComplex blocks it.
@@ -360,8 +368,8 @@ function ruleSource(js) {
 //
 // lispython's completion word boundary rule (completion_word_span), as tables and JS
 // regex sources (u flag) for completionWordSpan in nreplCore.ts. Python's \\d and \\w are
-// translated to \\p{Nd} and [\\p{L}\\p{N}_]; the stop and form-end classes list the
-// spec's code points, never JS \\s, which differs from Python's isspace.
+// translated to \\p{Nd} and [\\p{L}\\p{N}_]; the stop, form-end and number-end classes
+// list the spec's code points, never JS \\s, which differs from Python's isspace.
 
 /** The word boundary rule; a function declaration so it can be injected into the REPL webview. */
 export function wordBoundaryRule() {

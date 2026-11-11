@@ -767,8 +767,8 @@ export type WordBoundaryRule = ReturnType<typeof wordBoundaryRule>;
  * `rule`. `start` is where the typed prefix starts (dotted: `heapq.nl`), `replaceStart`
  * after its last `.`, `end` at the next `.` or the token's end; `leafStart` is where the
  * token's peeled front (`:`, `*`, leading signs) ends. A word that is empty at the caret
- * (in a string opening, after `(`) has all four at `caret`. `\n` is a stop and a form-end
- * character, so a multi-line text behaves as the caret's line.
+ * (in a string opening, after `(`) has all four at `caret`. `\n` is a stop, form-end and
+ * number-end character, so a multi-line text behaves as the caret's line.
  * Injected into the webview, so self-contained: `rule` (wordBoundaryRule()) is a
  * parameter because a call to an imported function does not survive toString in the
  * unbundled build.
@@ -801,7 +801,7 @@ export function completionWordSpan(text: string, caret: number, rule: WordBounda
     const metas = combos(rule.wrappers, rule.metaChars);
     const badTails = longestFirst([...rule.openings, ...rule.metaChars]);
     const stringOpening = sticky(`${rule.stringPrefix}(?:${rule.stringOpenings.map(escape).join('|')})`);
-    const number = sticky(`(?:${rule.numberToken})(?![^${rule.formEndClass}])`);
+    const number = sticky(`(?:${rule.numberToken})(?![^${rule.numberEndClass}])`);
     const lexAt = (i: number): ['symbol' | 'number' | 'other', number] => {
         const at = (entries: string[], ok: (end: number) => boolean) =>
             entries.find((e) => text.startsWith(e, i) && ok(i + e.length));
