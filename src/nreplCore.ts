@@ -767,8 +767,8 @@ export type WordBoundaryRule = ReturnType<typeof wordBoundaryRule>;
  * `rule`. `start` is where the typed prefix starts (dotted: `heapq.nl`), `replaceStart`
  * after its last `.`, `end` at the next `.` or the token's end; `leafStart` is where the
  * token's peeled front (`:`, `*`, leading signs) ends. A word that is empty at the caret
- * (in a string opening, after `(`) has all four at `caret`. `\n` is a stop and a form-end
- * character, so a multi-line text behaves as the caret's line.
+ * (in a string opening, after `(`) has all four at `caret`. `\n` is a stop, form-end and
+ * number-end character, so a multi-line text behaves as the caret's line.
  * Injected into the webview, so self-contained: `rule` (wordBoundaryRule()) is a
  * parameter because a call to an imported function does not survive toString in the
  * unbundled build.
