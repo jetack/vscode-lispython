@@ -801,7 +801,7 @@ export function completionWordSpan(text: string, caret: number, rule: WordBounda
     const metas = combos(rule.wrappers, rule.metaChars);
     const badTails = longestFirst([...rule.openings, ...rule.metaChars]);
     const stringOpening = sticky(`${rule.stringPrefix}(?:${rule.stringOpenings.map(escape).join('|')})`);
-    const number = sticky(`(?:${rule.numberToken})(?![^${rule.formEndClass}])`);
+    const number = sticky(`(?:${rule.numberToken})(?![^${rule.numberEndClass}])`);
     const lexAt = (i: number): ['symbol' | 'number' | 'other', number] => {
         const at = (entries: string[], ok: (end: number) => boolean) =>
             entries.find((e) => text.startsWith(e, i) && ok(i + e.length));

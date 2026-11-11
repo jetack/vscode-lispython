@@ -2,16 +2,18 @@
 //
 // lispython's completion word boundary rule (completion_word_span), as tables and JS
 // regex sources (u flag) for completionWordSpan in nreplCore.ts. Python's \d and \w are
-// translated to \p{Nd} and [\p{L}\p{N}_]; the stop and form-end classes list the
-// spec's code points, never JS \s, which differs from Python's isspace.
+// translated to \p{Nd} and [\p{L}\p{N}_]; the stop, form-end and number-end classes
+// list the spec's code points, never JS \s, which differs from Python's isspace.
 
 /** The word boundary rule; a function declaration so it can be injected into the REPL webview. */
 export function wordBoundaryRule() {
     return {
-        stopChars: '\u0009\u000a\u000b\u000c\u000d\u001c\u001d\u001e\u001f "),;[]}\u0085\u00a0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000',
+        stopChars: '\u0009\u000a\u000b\u000c\u000d\u001c\u001d\u001e\u001f "),;[]{}\u0085\u00a0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000',
         formEndChars: '\u0009\u000a\u000b\u000c\u000d\u001c\u001d\u001e\u001f ),;]}\u0085\u00a0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000',
-        stopClass: '\\u0009\\u000a\\u000b\\u000c\\u000d\\u001c\\u001d\\u001e\\u001f\\u0020"\\),;\\[\\]\\}\\u0085\\u00a0\\u1680\\u2000\\u2001\\u2002\\u2003\\u2004\\u2005\\u2006\\u2007\\u2008\\u2009\\u200a\\u2028\\u2029\\u202f\\u205f\\u3000',
+        numberEndChars: '\u0009\u000a\u000b\u000c\u000d\u001c\u001d\u001e\u001f ),;]{}\u0085\u00a0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000',
+        stopClass: '\\u0009\\u000a\\u000b\\u000c\\u000d\\u001c\\u001d\\u001e\\u001f\\u0020"\\),;\\[\\]\\{\\}\\u0085\\u00a0\\u1680\\u2000\\u2001\\u2002\\u2003\\u2004\\u2005\\u2006\\u2007\\u2008\\u2009\\u200a\\u2028\\u2029\\u202f\\u205f\\u3000',
         formEndClass: '\\u0009\\u000a\\u000b\\u000c\\u000d\\u001c\\u001d\\u001e\\u001f\\u0020\\),;\\]\\}\\u0085\\u00a0\\u1680\\u2000\\u2001\\u2002\\u2003\\u2004\\u2005\\u2006\\u2007\\u2008\\u2009\\u200a\\u2028\\u2029\\u202f\\u205f\\u3000',
+        numberEndClass: '\\u0009\\u000a\\u000b\\u000c\\u000d\\u001c\\u001d\\u001e\\u001f\\u0020\\),;\\]\\{\\}\\u0085\\u00a0\\u1680\\u2000\\u2001\\u2002\\u2003\\u2004\\u2005\\u2006\\u2007\\u2008\\u2009\\u200a\\u2028\\u2029\\u202f\\u205f\\u3000',
         alnum: '[\\p{L}\\p{N}]',
         wrappers: ['**', '*', '^', ''],
         openings: ['(', '[', '{'],
