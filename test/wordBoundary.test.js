@@ -203,6 +203,22 @@ buildTest('completionWordSpan and symbolPrefixStart give every spec case', (core
     assert.deepStrictEqual(wrong, []);
 });
 
+buildTest('completionWordSpan reads the context from earlier CRLF lines', (core) => {
+    const rule = core.wordBoundaryRule();
+    const span = (text, caret) => {
+        const s = core.completionWordSpan(text, caret, rule);
+        return s === null ? null : [s.start, s.replaceStart, s.end];
+    };
+    // Line 2 (from 6) is in the f"""-literal opened on line 1; its field's { is at 8, so `ab`
+    // (9-11) is a field's word, ending at the spec's `:` (11); read alone as code, the line
+    // would make `ab:>4` one symbol (9-14).
+    const text = 'f"""\r\n  {ab:>4}\r\n"""';
+    assert.deepStrictEqual(span(text, 11), [9, 9, 11]);
+    assert.deepStrictEqual(span(text, 10), [9, 9, 11]);
+    // Between `>` (12) and `4` (13): the format spec's text, no word.
+    assert.strictEqual(span(text, 13), null);
+});
+
 // VS Code's word lookups see the caret's line alone, so they cannot read the caret's context
 // from the text's start. The spec cases whose word differs for that reason, by reason
 // ([text, caret] in code points, [before, text, caret] after other lines). Anything else
@@ -590,10 +606,9 @@ function runPython(args, input) {
     return r.stdout;
 }
 
-// Reads [[before, line, col], ...] (code points) as JSON on stdin; writes, per query, where
-// the reader refuses the text before the caret, [null, the error's message] (null when it
-// stopped with none), else its caret_context's context and resume and the
-// completion_word_span.
+// Reads [[before, line, col], ...] (code points) as JSON on stdin; writes, per query, its
+// caret_context's context and resume (where the reader refuses the text before the caret,
+// null and the error's message, null when it stopped with none) and the completion_word_span.
 const SPANS_PY = `
 import json, sys
 from lispy.core.parser import caret_context, caret_tokens, completion_word_span
@@ -601,16 +616,18 @@ queries = json.loads(sys.stdin.buffer.read().decode("utf-8"))
 out = []
 for before, line, col in queries:
     found = caret_context(before + line, len(before) + col)
+    span = completion_word_span(line, col, before)
     if found is None:
         tokens = caret_tokens(line, col, before)
-        out.append([None, tokens[-1][0] if tokens and tokens[-1][1] == "error" else None])
+        out.append([None, tokens[-1][0] if tokens and tokens[-1][1] == "error" else None, span])
     else:
-        out.append([found[0], found[1], completion_word_span(line, col, before)])
+        out.append([found[0], found[1], span])
 json.dump(out, sys.stdout)
 `;
 
 // The one refusal caretContext does not make: a conversion name other than s, r and a, a
 // set the spec does not publish (a client need not agree on a text the reader refuses).
+// lispython card TASK-1362 asks for the set to be published.
 const UNPORTED_REFUSAL = "expected 's', 'r', or 'a'";
 
 /** The lexer's line breaks (split_lines). */
@@ -644,21 +661,22 @@ buildTest('fuzz: caretContext and completionWordSpan are lispython\'s caret_cont
     const asCodePoints = ({ input: [before, line, col] }) => [before, line, codePoints(line, col)];
     const answers = JSON.parse(runPython(['-c', SPANS_PY], JSON.stringify(queries.map(asCodePoints))));
     assert.strictEqual(answers.length, queries.length);
-    const seen = { checked: 0, text: 0, field: 0, multiLine: 0, refused: 0 };
+    const seen = { checked: 0, text: 0, field: 0, multiLine: 0, refused: 0, lineAlone: 0 };
     queries.forEach(({ text, caret, input: [before, line] }, i) => {
         const [context, resume, span] = answers[i];
         const scanned = before + line;
         const at = show(text, caret);
         if (context === null) {
             // The reader refuses the text before the caret: so does caretContext, but for
-            // the unported check. Its word is then no concern (the client need not agree).
-            if (resume === null || !resume.includes(UNPORTED_REFUSAL)) {
-                assert.strictEqual(core.caretContext(scanned, caret, rule), null, `caretContext ${at}, refused: ${resume}`);
-                seen.refused++;
-            }
-            return;
+            // the unported check, where the word is no concern (the client need not agree).
+            if (resume !== null && resume.includes(UNPORTED_REFUSAL)) return;
+            assert.strictEqual(core.caretContext(scanned, caret, rule), null, `caretContext ${at}, refused: ${resume}`);
+            seen.refused++;
+            // Then the word is the line-alone reading's (_line_context), compared below.
+            if (before !== '') seen.lineAlone++;
+        } else {
+            assert.deepStrictEqual(core.caretContext(scanned, caret, rule), { context, resume: utf16(scanned, resume) }, `caretContext ${at}`);
         }
-        assert.deepStrictEqual(core.caretContext(scanned, caret, rule), { context, resume: utf16(scanned, resume) }, `caretContext ${at}`);
         // The whole text: what follows the caret's line is never read.
         const got = core.completionWordSpan(text, caret, rule);
         const expected = span === null ? null : span.map((cp) => before.length + utf16(line, cp));
@@ -669,8 +687,8 @@ buildTest('fuzz: caretContext and completionWordSpan are lispython\'s caret_cont
         if (before !== '') seen.multiLine++;
     });
     // The corpus reaches what the field alphabet is there for.
-    assert.ok(seen.checked > 50000 && seen.text > 10000 && seen.field > 4000 && seen.multiLine > 4000 && seen.refused > 1000,
-        JSON.stringify(seen));
+    assert.ok(seen.checked > 50000 && seen.text > 10000 && seen.field > 4000 && seen.multiLine > 4000 && seen.refused > 1000
+        && seen.lineAlone > 100, JSON.stringify(seen));
 });
 
 // --- the pinned spec and its derived files are current --------------------------------

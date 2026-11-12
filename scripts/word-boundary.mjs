@@ -186,9 +186,16 @@ function tokenRegex(rule, inField, fieldLevel) {
     const literals = (entries) => alt(byLengthDesc(entries).map(literal));
     let end = fieldLevel ? `$|${delimiter}` : '$';
     if (inField) end = `${continuation}|${end}`;
-    const escaped = rule.escapedStringOpenings.map(literal);
+    // Longest first, as the lexer tries them; a bad prefix stands before any of them, so
+    // before the shortest (each longer one starts with it).
+    const escapedOpenings = byLengthDesc(rule.escapedStringOpenings);
+    const shortestEscaped = escapedOpenings.at(-1);
+    for (const e of escapedOpenings) {
+        if (!e.startsWith(shortestEscaped)) throw new Error(`escaped opening ${e} does not start with ${shortestEscaped}`);
+    }
+    const escaped = escapedOpenings.map(literal);
     const quote = inField ? `${escaped.join('|')}|` : '';
-    const stopAhead = inField ? `(?=[${S}]|${escaped.at(-1)}|${end})` : `(?=[${S}]|${end})`;
+    const stopAhead = inField ? `(?=[${S}]|${literal(shortestEscaped)}|${end})` : `(?=[${S}]|${end})`;
     const fieldClose = rule.fieldBraces[1];
     const [char, commentChar] = fieldLevel
         ? [`(?!${delimiter})[^${classBody([...rule.stopChars, rule.backslash])}]`,
