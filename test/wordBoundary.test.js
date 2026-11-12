@@ -557,10 +557,11 @@ const FIELD_ALPHABET = [
 ];
 // How a field text starts: in a literal, in its field, raw, a t-string, a triple-quoted
 // string, at a conversion (a valid name, so what follows it is what the reader checks; or
-// none, so the name is random; or a string prefix in either case, which a quote may follow).
+// none, so the name is random; or a string prefix in either case, which a quote may follow,
+// also in a literal that quote does not close, so the refusal's span shows in the resume).
 const FIELD_STARTS = [
     'f"', 'f"{', 'rf"', 't"', "'''", "f'''{", 'f"{x', '"', '', 'f"{x!r', 'f"{x!a', 'f"{x!', 'f"{x!b', 'f"{x!Rb', 'f"{x!F',
-    'f"{x!U', 'f"{x!bR', 'f"{x!Fr',
+    'f"{x!U', 'f"{x!bR', 'f"{x!Fr', "f'''{x!Fr", 'f"""{x!rf',
 ];
 // Lines the reader refuses, a refusal of each kind (a bad conversion name, a single }, a
 // leading =, an empty conversion, a conversion string, a quote in a spec, a bare " in an

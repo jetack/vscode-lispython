@@ -1046,7 +1046,8 @@ export function caretContext(text: string, offset: number, rule: WordBoundaryRul
         if (brk !== null) return refuse(brk, brk + 1);
         if (stop === 'mixed') return refuse(literal.quoteStart, literal.body, true);
         // Never taken (the text's end lies at or past the offset, so pastStop held above), but
-        // kept as the scan's stop: without it an eof would fall through to closeField below.
+        // kept as the scan's stop: without it an eof would fall through to the single-`}`
+        // refusal below in a literal's own text, and to closeField in a format spec.
         if (stop === 'eof') return reached('text');
         if (stop === 'quote' && spec !== null) return refuse(at, at + literal.quote.length);
         state.emitted++;
