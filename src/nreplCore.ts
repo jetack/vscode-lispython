@@ -768,8 +768,13 @@ export interface CaretContext {
      * conversion, a comment).
      */
     context: 'code' | 'field' | 'bracket' | 'text';
-    /** Where the last string or literal closed before the offset ends (0 when none). */
+    /**
+     * Where a word may start from: the end of the last string or literal closed before the
+     * offset, or where the scan last resumed past a refusal, whichever is later (0 when none).
+     */
     resume: number;
+    /** Whether the reader refuses the text before the offset (the scan recovered past it). */
+    refused: boolean;
 }
 
 /**
@@ -787,19 +792,29 @@ export function fieldBlanksEnd(text: string, i: number, rule: WordBoundaryRule):
 }
 
 /**
- * The context of UTF-16 offset `offset` (a caret) of `text`, by lispython's caret_context
- * (`_Lexer` run with a stop offset, src/lispy/core/parser.py): one pass over `text` from its
- * start over a stack of the f/t literals and fields open, ending where it would read at or
- * past the offset (spec steps 2-6). Null where the reader refuses the text before the offset:
- * a single `}` in a literal's text, the closing quote inside a format spec, a line break in a
- * single-quoted literal's spec text, a leading `=` in a field, a bare `"` in an escaped
- * string, an unterminated literal, or a malformed conversion (a name not in conversionNames,
- * or anything but blanks after it). The lexer reads past the offset where lispython's does (to
- * a string's closing quote), so `text` must end where the caller's scan ends.
+ * The context of UTF-16 offset `offset` (a caret, at most `text.length`) of `text`, by
+ * lispython's recovered reading (`_recovered_context` over `_Lexer` run with a stop offset,
+ * src/lispy/core/parser.py): one pass over `text` from its start over a stack of the f/t
+ * literals and fields open, ending where it would read at or past the offset (the spec's
+ * context, mode, text, refusals, resume and body steps).
+ *
+ * The reader refuses some texts before the offset, each refusal with a span: a leading `=` in
+ * a field (the `=`), a single `}` in a literal's own text (the `}`), a line break in a
+ * single-quoted literal's spec text (its first character), the literal's closing quote in a
+ * spec (the quote as written), a bare `"` in an escaped string or literal (its opening `\"`),
+ * and a malformed conversion (the `!`, the name, or one character, by the spec's conversion
+ * rules). An unclosed string or literal is no refusal: its text holds the offset. Past a
+ * refusal the scan goes on in place, as the reader recovers: the stack keeps its entries up
+ * to its innermost literal, and the scan resumes in that literal's text at the refusal's end
+ * (or where it last resumed, when later), so it always reaches the offset; `refused` says
+ * whether it did (where lispython's caret_context is None). The lexer reads past the offset
+ * where lispython's does (to a string's closing quote), so `text` must end where the caller's
+ * scan ends.
  * Injected into the webview, so self-contained but for the injected fieldBlanksEnd.
  */
-export function caretContext(text: string, offset: number, rule: WordBoundaryRule): CaretContext | null {
-    interface Literal { kind: 'literal'; raw: boolean; quote: string }
+export function caretContext(text: string, offset: number, rule: WordBoundaryRule): CaretContext {
+    // `quoteStart` and `body` bound the opening quote, a bare `"` refusing an escaped one.
+    interface Literal { kind: 'literal'; raw: boolean; quote: string; quoteStart: number; body: number }
     interface Field { kind: 'field'; literal: Literal; brackets: string[]; spec: boolean; nested: boolean; first: number }
     const src = text;
     const n = src.length;
@@ -811,22 +826,46 @@ export function caretContext(text: string, offset: number, rule: WordBoundaryRul
     const delimiter = new RegExp(rule.fieldDelimiter, 'uy');
     const stringPrefix = new RegExp(rule.stringPrefix, 'uy');
     const wordChar = new RegExp(rule.wordChar, 'uy');
+    // A field's string openings, longest first (an escaped one starts with a backslash, a
+    // plain one with its quote, so neither shadows the other).
+    const fieldOpenings = [...rule.escapedStringOpenings, ...rule.stringOpenings].sort((a, b) => b.length - a.length);
     const [fieldOpen, fieldClose] = [rule.fieldBraces[0], rule.fieldBraces[1]];
     const matchesAt = (re: RegExp, i: number) => {
         re.lastIndex = i;
         return re.test(src);
     };
+    // The end of the one character (code point) at `i`: a span the spec gives as "its first character".
+    const charEnd = (i: number) => i + ((src.codePointAt(i) ?? 0) > 0xffff ? 2 : 1);
     const stack: (Literal | Field)[] = [];
     // `emitted` counts the tokens lispython's lexer emits, so a field whose count has not
     // moved since its `{` has no expression yet (a leading `=` is refused there).
-    const state = { pos: 0, emitted: 0, closedStringEnd: 0, done: false, context: null as CaretContext['context'] | null };
+    const state = {
+        pos: 0, emitted: 0, closedStringEnd: 0, resumedAt: 0, refused: false, done: false,
+        context: 'code' as CaretContext['context'],
+    };
     const pastStop = (i: number) => i >= offset;
     const reached = (context: CaretContext['context']) => {
         state.context = context;
         state.done = true;
     };
-    const refuse = () => {
-        state.done = true;
+    const dropFields = () => {
+        while (stack.length && stack[stack.length - 1].kind === 'field') stack.pop();
+    };
+    // A refusal spanning [start, end), before the offset: the scan goes on in place (the
+    // spec's context step), in the innermost literal's text (top level when none), the
+    // fields above it dropped. `ownLiteral` (a bare " refusing an escaped literal) drops
+    // that literal too: resumed in, it would meet the same " again. lispython drops it as
+    // well for any refusal not ending past where the scan last resumed (none does, as each is
+    // found ahead of it), so every refusal moves the scan forward or pops a literal and the
+    // scan always ends.
+    const refuse = (start: number, end: number, ownLiteral = false) => {
+        state.refused = true;
+        dropFields();
+        if (stack.length && (ownLiteral || end <= state.resumedAt)) {
+            stack.pop();
+            dropFields();
+        }
+        state.pos = state.resumedAt = Math.max(end, state.resumedAt);
     };
 
     // scan_string_body: why the body read from `i` stopped ('quote', 'field', 'close',
@@ -880,16 +919,57 @@ export function caretContext(text: string, offset: number, rule: WordBoundaryRul
         stack.pop();
         state.pos = at + 1;
     };
-    // _conversion: the conversionEnds character the `!` at `bang` ends at, or null where
-    // the reader refuses it (the name right after the `!` not in conversionNames, an empty
-    // one included, or anything but blanks between the name and a conversionEnds character,
-    // a string included, which _string_after_bang always refuses).
-    const conversion = (bang: number) => {
+    // A plain string whose quote `quote` (as written) starts at `quoteStart`, read whole:
+    // 'text' where its text holds the offset (its closing quote ending after it, or none),
+    // 'refused' where a bare " ends an escaped one before the offset (at its opening quote),
+    // else 'closed', the scan going on after its quote.
+    const plainString = (quoteStart: number, quote: string, raw: boolean) => {
+        const body = quoteStart + quote.length;
+        const [stop, at] = scanBody(body, quote, raw, false, rule.fieldBraces);
+        const closed = stop === 'quote' ? at + quote.length - 1 : n;
+        if (pastStop(closed) && (stop !== 'mixed' || pastStop(at))) return 'text';
+        if (stop !== 'quote') {
+            refuse(quoteStart, body);
+            return 'refused';
+        }
+        state.pos = state.closedStringEnd = at + quote.length;
+        return 'closed';
+    };
+    // _conversion: the conversion at the `!` at `bang`, a conversionEnds character lying
+    // between it and the offset; field mode resumes at that character, or the conversion is
+    // refused.
+    const conversion = (field: Field, bang: number) => {
         let nameEnd = bang + 1;
         while (nameEnd < n && matchesAt(wordChar, nameEnd)) nameEnd = wordChar.lastIndex;
-        if (!rule.conversionNames.includes(src.slice(bang + 1, nameEnd))) return null;
+        const name = src.slice(bang + 1, nameEnd);
+        const openingAt = (i: number) => fieldOpenings.find((o) => src.startsWith(o, i));
+        // A string read in the conversion's place, refused at `at` (its own refusal first).
+        const conversionString = (at: number, quoteStart: number, quote: string, prefix: string) => {
+            if (plainString(quoteStart, quote, prefix.includes(rule.rawLetter)) !== 'refused') refuse(at, charEnd(at));
+        };
+        if (name === '') {
+            const at = fieldBlanksEnd(src, bang + 1, rule);
+            // A name after a gap is refused at the `!`.
+            if (matchesAt(wordChar, at)) return refuse(bang, bang + 1);
+            const opening = openingAt(at);
+            if (opening !== undefined) return conversionString(at, at, opening, '');
+            return refuse(at, charEnd(at));
+        }
+        // A name glued to a quote is that string's prefix when it is one.
+        const opening = openingAt(nameEnd);
+        const prefix = name.toLowerCase();
+        if (opening !== undefined && rule.plainStringPrefixes.includes(prefix)) {
+            return conversionString(bang + 1, nameEnd, opening, prefix);
+        }
+        if (opening !== undefined && rule.interpolatedStringPrefixes.includes(prefix)) {
+            return refuse(bang + 1, charEnd(bang + 1)); // an f/t-string there is never read
+        }
+        if (!rule.conversionNames.includes(name)) return refuse(bang + 1, nameEnd);
         const rest = fieldBlanksEnd(src, nameEnd, rule);
-        return rest < n && rule.conversionEnds.includes(src[rest]) ? rest : null;
+        if (rest >= n || !rule.conversionEnds.includes(src[rest])) return refuse(rest, charEnd(rest));
+        if (src[rest] === fieldClose) return closeField(rest);
+        field.spec = true;
+        state.pos = rest + 1;
     };
     // _delimiter: the field's expression ends at the `}`, `:` or `!` at `at`.
     const delimiterAt = (field: Field, at: number) => {
@@ -901,10 +981,7 @@ export function caretContext(text: string, offset: number, rule: WordBoundaryRul
             let end = at + 1;
             while (end < offset && !rule.conversionEnds.includes(src[end])) end++;
             if (end >= offset) return reached('text');
-            const rest = conversion(at);
-            if (rest === null) return refuse();
-            if (src[rest] === fieldClose) return closeField(rest);
-            at = rest;
+            return conversion(field, at);
         }
         field.spec = true;
         state.pos = at + 1;
@@ -916,16 +993,13 @@ export function caretContext(text: string, offset: number, rule: WordBoundaryRul
         const quote = opening.slice(written.length);
         const prefix = written.toLowerCase(); // may change its length (İ)
         const raw = prefix.includes(rule.rawLetter);
+        const quoteStart = start + written.length;
         state.emitted++;
         if (!rule.kindLetters.some((letter) => prefix.includes(letter))) {
-            const [stop, at] = scanBody(start + opening.length, quote, raw, false, rule.fieldBraces);
-            const closed = stop === 'quote' ? at + quote.length - 1 : n;
-            if (pastStop(closed) && (stop !== 'mixed' || pastStop(at))) return reached('text');
-            if (stop !== 'quote') return refuse();
-            state.pos = state.closedStringEnd = at + quote.length;
+            if (plainString(quoteStart, quote, raw) === 'text') reached('text');
             return;
         }
-        stack.push({ kind: 'literal', raw, quote });
+        stack.push({ kind: 'literal', raw, quote, quoteStart, body: start + opening.length });
         state.pos = start + opening.length;
     };
     // _token: one token at the top level or in a field's expression.
@@ -934,12 +1008,14 @@ export function caretContext(text: string, offset: number, rule: WordBoundaryRul
         const re = tokenRegex[mode];
         re.lastIndex = state.pos;
         const m = re.exec(src);
-        if (pastStop(m === null ? n : m.index)) return reached(mode);
-        if (m === null) return refuse();
+        // No token ahead: the offset (at most the text's end) lies past what is read.
+        if (m === null || pastStop(m.index)) return reached(mode);
         const start = m.index;
         if (field !== null && mode === 'field') {
             // The debug `=` (the spec's prose): alone, it is no expression.
-            if (src[start] === '=' && state.emitted === field.first && !src.startsWith('=', start + 1)) return refuse();
+            if (src[start] === '=' && state.emitted === field.first && !src.startsWith('=', start + 1)) {
+                return refuse(start, start + 1);
+            }
             if (src[start] === fieldClose || matchesAt(delimiter, start)) return delimiterAt(field, start);
         }
         const tk = m[0];
@@ -966,11 +1042,15 @@ export function caretContext(text: string, offset: number, rule: WordBoundaryRul
         // A single-quoted literal's spec text holds no line break.
         const singleQuoted = spec !== null && literal.quote.split(rule.backslash).join('').length === 1;
         const brk = singleQuoted ? specLineBreak(state.pos, at) : null;
-        // The text holds the offset: up to its quote's end, or before what else ends it; a
-        // line break or a bare " before the offset is refused first.
+        // The text holds the offset: up to its quote's end, or before what else ends it (the
+        // text's end, for an unclosed literal); a line break or a bare " before the offset is
+        // refused first.
         const end = stop === 'quote' ? at + literal.quote.length - 1 : at;
         if (pastStop(end) && !((brk !== null && !pastStop(brk)) || (stop === 'mixed' && !pastStop(at)))) return reached('text');
-        if (brk !== null || stop === 'mixed' || stop === 'eof' || (stop === 'quote' && spec !== null)) return refuse();
+        if (brk !== null) return refuse(brk, brk + 1);
+        if (stop === 'mixed') return refuse(literal.quoteStart, literal.body, true);
+        if (stop === 'eof') return reached('text'); // never: the text's end lies at or past the offset
+        if (stop === 'quote' && spec !== null) return refuse(at, at + literal.quote.length);
         state.emitted++;
         if (stop === 'quote') {
             state.pos = state.closedStringEnd = at + literal.quote.length;
@@ -979,7 +1059,7 @@ export function caretContext(text: string, offset: number, rule: WordBoundaryRul
             if (spec !== null) spec.nested = true;
             openField(literal, at);
         } else if (spec === null) {
-            refuse(); // a single } in a literal's own text
+            refuse(at, at + 1); // a single } in a literal's own text
         } else {
             closeField(at);
         }
@@ -991,7 +1071,7 @@ export function caretContext(text: string, offset: number, rule: WordBoundaryRul
         else if (top.kind === 'field' && !top.spec) token(top);
         else body(top);
     }
-    return state.context === null ? null : { context: state.context, resume: state.closedStringEnd };
+    return { context: state.context, resume: Math.max(state.closedStringEnd, state.resumedAt), refused: state.refused };
 }
 
 /**
@@ -1001,8 +1081,10 @@ export function caretContext(text: string, offset: number, rule: WordBoundaryRul
  * `rule` the tables in `rule`. `text` is any text holding the caret's whole line (a
  * document's, a textarea's): the caret's context is read from the text's start (a field of an
  * f-string opened lines above, a string still open), and nothing after the caret's line is
- * read, as lispython scans only the text before the line and the line. Null where the caret
- * is in a string's or comment's text (no word: offer no completion). `start` is where the
+ * read, as lispython scans only the text before the line and the line. Past a text the reader
+ * refuses before the caret the context is the recovered one (caretContext), and a word starts
+ * no earlier than where that scan last resumed. Null where the caret is in a string's or
+ * comment's text (no word: offer no completion). `start` is where the
  * typed prefix starts (dotted: `heapq.nl`), `replaceStart` after its last `.`, `end` at the
  * next `.` or the token's end; `leafStart` is where the token's peeled front (`:`, `*`,
  * leading signs) ends. A word that is empty at the caret (in a string opening, after `(`) has
@@ -1014,9 +1096,8 @@ export function caretContext(text: string, offset: number, rule: WordBoundaryRul
 export function completionWordSpan(text: string, caret: number, rule: WordBoundaryRule):
     { start: number; replaceStart: number; end: number; leafStart: number } | null {
     // The caret's line, where the lexer ends lines (LF, CR, CRLF), and its context: the
-    // scan from the text's start. Where the reader refuses that scan, lispython recovers
-    // past the error and a client need not agree (the spec's context step): code from the
-    // line's start, with no recovery of its own.
+    // scan from the text's start, recovered past any refusal before the caret as the reader
+    // recovers, so a word below a refused text is still read in its own context.
     const isBreak = (c: string) => rule.lineBreakChars.includes(c);
     let lineStart = caret;
     while (lineStart > 0 && !isBreak(text[lineStart - 1])) lineStart--;
@@ -1028,10 +1109,9 @@ export function completionWordSpan(text: string, caret: number, rule: WordBounda
     // would give no other context (all it reads there lies past the caret, and every
     // lookahead taking the line's end takes a line break too), only a longer scan: a
     // string's body read to its close at the document's end.
-    const found = caretContext(text.slice(0, lineEnd), caret, rule);
-    const resume = found === null ? 0 : Math.max(found.resume - lineStart, 0);
-    const context = found === null ? 'code' : found.context;
+    const { context, resume: resumeAt } = caretContext(text.slice(0, lineEnd), caret, rule);
     if (context === 'text') return null;
+    const resume = Math.max(resumeAt - lineStart, 0);
 
     const isStop = (c: string) => rule.stopChars.includes(c);
     const sticky = (source: string) => new RegExp(source, 'uy');
