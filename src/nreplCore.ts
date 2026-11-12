@@ -793,10 +793,9 @@ export function fieldBlanksEnd(text: string, i: number, rule: WordBoundaryRule):
  * past the offset (spec steps 2-6). Null where the reader refuses the text before the offset:
  * a single `}` in a literal's text, the closing quote inside a format spec, a line break in a
  * single-quoted literal's spec text, a leading `=` in a field, a bare `"` in an escaped
- * string, an unterminated literal, or a malformed conversion. A conversion's name is not
- * checked against s, r and a: the spec does not publish that set, and a client need not agree
- * on a text the reader refuses. The lexer reads past the offset where lispython's does (to a
- * string's closing quote), so `text` must end where the caller's scan ends.
+ * string, an unterminated literal, or a malformed conversion (a name not in conversionNames,
+ * or anything but blanks after it). The lexer reads past the offset where lispython's does (to
+ * a string's closing quote), so `text` must end where the caller's scan ends.
  * Injected into the webview, so self-contained but for the injected fieldBlanksEnd.
  */
 export function caretContext(text: string, offset: number, rule: WordBoundaryRule): CaretContext | null {
@@ -881,14 +880,14 @@ export function caretContext(text: string, offset: number, rule: WordBoundaryRul
         stack.pop();
         state.pos = at + 1;
     };
-    // _conversion, short of checking the name: the conversionEnds character the `!` at
-    // `bang` ends at, or null where the reader refuses it (no name right after the `!`, or
-    // anything but blanks between the name and a conversionEnds character, a string
-    // included, which _string_after_bang always refuses).
+    // _conversion: the conversionEnds character the `!` at `bang` ends at, or null where
+    // the reader refuses it (the name right after the `!` not in conversionNames, an empty
+    // one included, or anything but blanks between the name and a conversionEnds character,
+    // a string included, which _string_after_bang always refuses).
     const conversion = (bang: number) => {
         let nameEnd = bang + 1;
         while (nameEnd < n && matchesAt(wordChar, nameEnd)) nameEnd = wordChar.lastIndex;
-        if (nameEnd === bang + 1) return null;
+        if (!rule.conversionNames.includes(src.slice(bang + 1, nameEnd))) return null;
         const rest = fieldBlanksEnd(src, nameEnd, rule);
         return rest < n && rule.conversionEnds.includes(src[rest]) ? rest : null;
     };
@@ -1014,9 +1013,10 @@ export function caretContext(text: string, offset: number, rule: WordBoundaryRul
  */
 export function completionWordSpan(text: string, caret: number, rule: WordBoundaryRule):
     { start: number; replaceStart: number; end: number; leafStart: number } | null {
-    // The caret's line, where the lexer ends lines (LF, CR, CRLF), and its context
-    // (_line_context): the scan from the text's start; where the reader refuses that, the
-    // line alone (resume then counted from the line's start); where it refuses that too, code.
+    // The caret's line, where the lexer ends lines (LF, CR, CRLF), and its context: the
+    // scan from the text's start. Where the reader refuses that scan, lispython recovers
+    // past the error and a client need not agree (the spec's context step): code from the
+    // line's start, with no recovery of its own.
     const isBreak = (c: string) => rule.lineBreakChars.includes(c);
     let lineStart = caret;
     while (lineStart > 0 && !isBreak(text[lineStart - 1])) lineStart--;
@@ -1028,13 +1028,8 @@ export function completionWordSpan(text: string, caret: number, rule: WordBounda
     // would give no other context (all it reads there lies past the caret, and every
     // lookahead taking the line's end takes a line break too), only a longer scan: a
     // string's body read to its close at the document's end.
-    let found = caretContext(text.slice(0, lineEnd), caret, rule);
-    let resume = found === null ? 0 : Math.max(found.resume - lineStart, 0);
-    // On the first line, the line alone is the scan just refused.
-    if (found === null && lineStart > 0) {
-        found = caretContext(line, col, rule);
-        if (found !== null) resume = found.resume;
-    }
+    const found = caretContext(text.slice(0, lineEnd), caret, rule);
+    const resume = found === null ? 0 : Math.max(found.resume - lineStart, 0);
     const context = found === null ? 'code' : found.context;
     if (context === 'text') return null;
 

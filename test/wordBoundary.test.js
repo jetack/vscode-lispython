@@ -217,11 +217,10 @@ buildTest('completionWordSpan reads the context from earlier lines, which end at
     assert.deepStrictEqual(span(text, 10), [9, 9, 11]);
     // Between `>` (12) and `4` (13): the format spec's text, no word.
     assert.strictEqual(span(text, 13), null);
-    // A bare CR ends line 1, whose single } the reader refuses, so line 2 (from 5) is read
-    // alone: its field's { is at 7, so `x` (8-9) is a field's word, ending at the
-    // conversion's `!` (9). With line 1 read as part of the caret's line, the refused text
-    // would be read as code, `x!r` one symbol (8-11).
-    assert.deepStrictEqual(span('f"}"\rf"{x!r}"', 9), [8, 8, 9]);
+    // Bare CRs end lines 1 and 2, so line 2 (6-8) is `x=` in the field opened at 4, and its
+    // `=` ends the line: the debug =, so the word is `x` (6-7). Were a bare CR no line break,
+    // the `=` would be followed by blanks and `y`: no debug =, and the word `x=` (6-8).
+    assert.deepStrictEqual(span('f"""{\rx=\ry}"""', 7), [6, 6, 7]);
 });
 
 // VS Code's word lookups see the caret's line alone, so they cannot read the caret's context
@@ -236,7 +235,7 @@ const WORD_PATTERN_DIVERGENCES = {
     "an f/t-string field is a context read from the text's start (its delimiters and debug = end the word); the wordPattern lexes the line as code": [
         ['f"{x!r}"', 4], ['f"{x:>10}"', 4], ['f"{x=}"', 4], ['f"{x =}"', 6], ['f"{x=}"', 5], ['t"{x!r}"', 4], ['f"""{x:>4}"""', 6],
         ['f"""\n', '  Name: {name!r}', 13], ['f"""\n', '  Width: {w:>10}', 11], ['f"""\n', '  {x=}', 4], ['f"{x!r}', 4],
-        ['f"{a\\=}"', 5], ['f"""{x=', 6], ['f"""{x= ', 6], ['f"{x=\\', 4], ['f"}"\n', 'f"{x!r}"', 4], ['f"{\\=}"', 4], ['f"{\\=}"', 5],
+        ['f"{a\\=}"', 5], ['f"""{x=', 6], ['f"""{x= ', 6], ['f"{x=\\', 4], ['f"{\\=}"', 4], ['f"{\\=}"', 5],
     ],
     'a word starts after a string closed earlier in its run, which the wordPattern lexes from a stop character': [
         ["(f '''a-b''')", 12], ["'''x:'''", 8], ["f\"{'''a-b'''}\"", 12],
@@ -466,13 +465,12 @@ const SEPARATOR_DIVERGENCES = {
     // Intended: double-click selects a word wherever it stands.
     "a string's or comment's text holds no completion word, but double-click selects one there": [
         ["x'''", 4], ['; ab', 4], ['f"{{ab"', 6], ['f"{x!r}"', 5], ['f"{x:>10}"', 7], ['f"\\N{ab}"', 7], ["'''ab'''", 5],
-        ['f"""\n', '  text {x}', 4], ['"a\n', 'b"', 1], ['(print "ab', 10], ['f"{x!}"\n', '(print "abc")', 10],
-        ['x = f"{a:\n}"\n', '"abc"', 4], ['a;b', 3],
+        ['f"""\n', '  text {x}', 4], ['"a\n', 'b"', 1], ['(print "ab', 10], ['a;b', 3],
     ],
     "an f/t-string field is a context read from the text's start (its delimiters and debug = end the word); a class per character knows none": [
         ['f"{x!r}"', 4], ['f"{x=}"', 4], ['f"{x =}"', 6], ['f"{x=}"', 5], ['t"{x!r}"', 4], ['f"""\n', '  Name: {name!r}', 13],
         ['f"""\n', '  {x=}', 4], ['f"{x!r}', 4], ['f"{a\\=}"', 5], ['f"""{x=', 6], ['f"""{x= ', 6], ['f"{x=\\', 4],
-        ['f"}"\n', 'f"{x!r}"', 4], ['f"{\\=}"', 4], ['f"{\\=}"', 5],
+        ['f"{\\=}"', 4], ['f"{\\=}"', 5],
     ],
     'a word starts after a string closed earlier in its run': [
         ["(f '''a-b''')", 12], ["f\"{'''a-b'''}\"", 12],
@@ -630,11 +628,6 @@ for before, line, col in queries:
 json.dump(out, sys.stdout)
 `;
 
-// The one refusal caretContext does not make: a conversion name other than s, r and a, a
-// set the spec does not publish (a client need not agree on a text the reader refuses).
-// lispython card TASK-1362 asks for the set to be published.
-const UNPORTED_REFUSAL = "expected 's', 'r', or 'a'";
-
 /** The lexer's line breaks (split_lines). */
 const LINE_BREAK = /\r\n|\r|\n/g;
 
@@ -666,22 +659,20 @@ buildTest('fuzz: caretContext and completionWordSpan are lispython\'s caret_cont
     const asCodePoints = ({ input: [before, line, col] }) => [before, line, codePoints(line, col)];
     const answers = JSON.parse(runPython(['-c', SPANS_PY], JSON.stringify(queries.map(asCodePoints))));
     assert.strictEqual(answers.length, queries.length);
-    const seen = { checked: 0, text: 0, field: 0, multiLine: 0, refused: 0, lineAlone: 0 };
+    const seen = { checked: 0, text: 0, field: 0, multiLine: 0, refused: 0 };
     queries.forEach(({ text, caret, input: [before, line] }, i) => {
         const [context, resume, span] = answers[i];
         const scanned = before + line;
         const at = show(text, caret);
         if (context === null) {
-            // The reader refuses the text before the caret: so does caretContext, but for
-            // the unported check, where the word is no concern (the client need not agree).
-            if (resume !== null && resume.includes(UNPORTED_REFUSAL)) return;
+            // The reader refuses the text before the caret: so does caretContext. lispython
+            // then recovers past the error, and the client need not agree, so the word is
+            // not compared.
             assert.strictEqual(core.caretContext(scanned, caret, rule), null, `caretContext ${at}, refused: ${resume}`);
             seen.refused++;
-            // Then the word is the line-alone reading's (_line_context), compared below.
-            if (before !== '') seen.lineAlone++;
-        } else {
-            assert.deepStrictEqual(core.caretContext(scanned, caret, rule), { context, resume: utf16(scanned, resume) }, `caretContext ${at}`);
+            return;
         }
+        assert.deepStrictEqual(core.caretContext(scanned, caret, rule), { context, resume: utf16(scanned, resume) }, `caretContext ${at}`);
         // The whole text: what follows the caret's line is never read.
         const got = core.completionWordSpan(text, caret, rule);
         const expected = span === null ? null : span.map((cp) => before.length + utf16(line, cp));
@@ -692,8 +683,8 @@ buildTest('fuzz: caretContext and completionWordSpan are lispython\'s caret_cont
         if (before !== '') seen.multiLine++;
     });
     // The corpus reaches what the field alphabet is there for.
-    assert.ok(seen.checked > 50000 && seen.text > 10000 && seen.field > 4000 && seen.multiLine > 4000 && seen.refused > 1000
-        && seen.lineAlone > 100, JSON.stringify(seen));
+    assert.ok(seen.checked > 50000 && seen.text > 10000 && seen.field > 4000 && seen.multiLine > 4000 && seen.refused > 1000,
+        JSON.stringify(seen));
 });
 
 // --- the pinned spec and its derived files are current --------------------------------
