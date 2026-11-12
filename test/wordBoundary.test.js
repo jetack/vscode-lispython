@@ -203,7 +203,7 @@ buildTest('completionWordSpan and symbolPrefixStart give every spec case', (core
     assert.deepStrictEqual(wrong, []);
 });
 
-buildTest('completionWordSpan reads the context from earlier CRLF lines', (core) => {
+buildTest('completionWordSpan reads the context from earlier lines, which end at CRLF or a bare CR', (core) => {
     const rule = core.wordBoundaryRule();
     const span = (text, caret) => {
         const s = core.completionWordSpan(text, caret, rule);
@@ -217,6 +217,11 @@ buildTest('completionWordSpan reads the context from earlier CRLF lines', (core)
     assert.deepStrictEqual(span(text, 10), [9, 9, 11]);
     // Between `>` (12) and `4` (13): the format spec's text, no word.
     assert.strictEqual(span(text, 13), null);
+    // A bare CR ends line 1, whose single } the reader refuses, so line 2 (from 5) is read
+    // alone: its field's { is at 7, so `x` (8-9) is a field's word, ending at the
+    // conversion's `!` (9). With line 1 read as part of the caret's line, the refused text
+    // would be read as code, `x!r` one symbol (8-11).
+    assert.deepStrictEqual(span('f"}"\rf"{x!r}"', 9), [8, 8, 9]);
 });
 
 // VS Code's word lookups see the caret's line alone, so they cannot read the caret's context
