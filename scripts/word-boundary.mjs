@@ -30,14 +30,15 @@ const GENERATED = `${GENERATED_BY} from test/word-boundary.json; do not edit`;
 
 // The steps completionWordSpan and the wordPattern below implement are this version's.
 // A new version may change the steps' prose, so it fails here until both are reviewed.
-const SPEC_VERSION = 4;
+const SPEC_VERSION = 5;
 
 // --- Python re (over str) to JS (u flag) ---------------------------------------------
 
 // Python's \w over str is str.isalnum() or '_', and str.isalnum() is any letter (Lu Ll
 // Lt Lm Lo) or numeric character (Nd Nl No): \p{L}\p{N}. Python's \d is Unicode Nd.
-// JS \p{} follows the running engine's Unicode version, not the spec's `rule.unicode`, so
-// a letter or digit assigned in only one of the two versions may classify differently.
+// JS \p{} follows the running JS engine's Unicode tables and Python's \w/\d follow the
+// running Python's, so a letter or digit assigned in only one of the two versions may
+// classify differently (the spec itself names no Unicode version).
 const ALNUM_CLASS_BODY = '\\p{L}\\p{N}';
 const WORD_CLASS_BODY = `${ALNUM_CLASS_BODY}_`;
 const DIGIT_CLASS_BODY = '\\p{Nd}';
