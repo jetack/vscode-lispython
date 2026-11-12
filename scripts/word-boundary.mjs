@@ -31,7 +31,7 @@ const GENERATED = `${GENERATED_BY} from test/word-boundary.json; do not edit`;
 
 // The steps completionWordSpan and the wordPattern below implement are this version's.
 // A new version may change the steps' prose, so it fails here until both are reviewed.
-const SPEC_VERSION = 6;
+const SPEC_VERSION = 8;
 
 // --- Python re (over str) to JS (u flag) ---------------------------------------------
 
@@ -231,6 +231,17 @@ function jsRule(rule) {
     const formEndChars = rule.formEndChars.join('');
     const numberEndChars = rule.numberEndChars.join('');
     if (rule.kindLetters.some(([letter]) => letter.length !== 1)) throw new Error('a kindLetters entry is no single letter');
+    const nameRun = new RegExp(`^[${WORD_CLASS_BODY}]+$`, 'u');
+    for (const name of rule.conversionNames) {
+        if (!nameRun.test(name)) throw new Error(`conversion name ${JSON.stringify(name)} is no run of name characters`);
+    }
+    // caretContext compares a conversion's lower-cased name whole against these, so each
+    // entry is lower-case and, but for the plain empty prefix, a run of name characters.
+    for (const prefix of [...rule.plainStringPrefixes, ...rule.interpolatedStringPrefixes]) {
+        if (prefix !== prefix.toLowerCase() || (prefix !== '' && !nameRun.test(prefix))) {
+            throw new Error(`string prefix ${JSON.stringify(prefix)} is no lower-case run of name characters`);
+        }
+    }
     return {
         stopChars,
         formEndChars,
@@ -275,6 +286,12 @@ function jsRule(rule) {
         lineBreakChars: bmpChars('lineBreakChars', rule.lineBreakChars),
         whitespace: bmpChars('whitespace', rule.whitespace),
         fieldDelimiter: translatePythonRegex(rule.fieldDelimiter),
+        // Compared whole against the name caretContext reads after a `!` (wordChar's run).
+        conversionNames: rule.conversionNames,
+        // A conversion's name glued to a string opening, lower-cased: that string's prefix,
+        // a plain string's (the string is read) or an f/t-string's (never read).
+        plainStringPrefixes: rule.plainStringPrefixes,
+        interpolatedStringPrefixes: rule.interpolatedStringPrefixes,
         conversionEnds: bmpChars('conversionEnds', rule.conversionEnds),
         debugBlockers: bmpChars('debugBlockers', rule.debugBlockers),
         // A conversion's name character: Python's isalnum() or _ (\w over str).

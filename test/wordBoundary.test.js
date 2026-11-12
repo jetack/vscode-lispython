@@ -217,11 +217,10 @@ buildTest('completionWordSpan reads the context from earlier lines, which end at
     assert.deepStrictEqual(span(text, 10), [9, 9, 11]);
     // Between `>` (12) and `4` (13): the format spec's text, no word.
     assert.strictEqual(span(text, 13), null);
-    // A bare CR ends line 1, whose single } the reader refuses, so line 2 (from 5) is read
-    // alone: its field's { is at 7, so `x` (8-9) is a field's word, ending at the
-    // conversion's `!` (9). With line 1 read as part of the caret's line, the refused text
-    // would be read as code, `x!r` one symbol (8-11).
-    assert.deepStrictEqual(span('f"}"\rf"{x!r}"', 9), [8, 8, 9]);
+    // Bare CRs end lines 1 and 2, so line 2 (6-8) is `x=` in the field opened at 4, and its
+    // `=` ends the line: the debug =, so the word is `x` (6-7). Were a bare CR no line break,
+    // the `=` would be followed by blanks and `y`: no debug =, and the word `x=` (6-8).
+    assert.deepStrictEqual(span('f"""{\rx=\ry}"""', 7), [6, 6, 7]);
 });
 
 // VS Code's word lookups see the caret's line alone, so they cannot read the caret's context
@@ -232,14 +231,23 @@ const WORD_PATTERN_DIVERGENCES = {
     "no completion word in a string's or comment's text, while VS Code's word lookup still finds one": [
         ['; ab', 4], ['f"{x!r}"', 5], ['f"{x:>10}"', 7], ['f"\\N{ab}"', 7], ['f"""\n', '  text {x}', 4], ['(print "ab', 10],
         ['a;b', 3],
+        // Past a refusal the reader resumes in the literal's text, where a quote closes it and
+        // the rest of the line opens a string.
+        ['f"{x!r"}"{fo', 12], ['f"{x!rb"a"} fo', 14], ['f"{x!fr"a"} fo', 14], ['f"{x!ub"a"} fo', 14], ['f"{=:"" fo', 10],
+        ['f"{,=:"" fo', 11], ['f"{x:\\\n', '" fo', 4], ['f"{x:\\\r\n', '" fo', 4], ['f"{x:" fo', 9], ['f"""{x:"""" fo', 14],
+        ['f"{f\\"{x:\\"} fo', 15],
     ],
     "an f/t-string field is a context read from the text's start (its delimiters and debug = end the word); the wordPattern lexes the line as code": [
         ['f"{x!r}"', 4], ['f"{x:>10}"', 4], ['f"{x=}"', 4], ['f"{x =}"', 6], ['f"{x=}"', 5], ['t"{x!r}"', 4], ['f"""{x:>4}"""', 6],
         ['f"""\n', '  Name: {name!r}', 13], ['f"""\n', '  Width: {w:>10}', 11], ['f"""\n', '  {x=}', 4], ['f"{x!r}', 4],
-        ['f"{a\\=}"', 5], ['f"""{x=', 6], ['f"""{x= ', 6], ['f"{x=\\', 4], ['f"}"\n', 'f"{x!r}"', 4], ['f"{\\=}"', 4], ['f"{\\=}"', 5],
+        ['f"{a\\=}"', 5], ['f"""{x=', 6], ['f"""{x= ', 6], ['f"{x=\\', 4], ['f"{\\=}"', 4], ['f"{\\=}"', 5],
+        // Read past a refusal, in the literal the reader resumes in.
+        ['f"}"\n', 'f"{x!r}"', 4], ['f"{z!} {y!r}"', 9], ['f"{x!}"\nf"""{a}\n', '{b!r}"""', 2],
     ],
     'a word starts after a string closed earlier in its run, which the wordPattern lexes from a stop character': [
         ["(f '''a-b''')", 12], ["'''x:'''", 8], ["f\"{'''a-b'''}\"", 12],
+        // The conversion's string, read before the reader refuses it.
+        ["f\"{x!r''':{a.'''b", 17],
     ],
 };
 
@@ -461,18 +469,25 @@ const SEPARATOR_DIVERGENCES = {
     ],
     'a meta char, prefix or opening is a separator even where it is part of a symbol': [
         ['a~b', 3], ['a@b', 3], ['a(b', 3], ["a'b", 3], ['except*', 7], ['**x', 1], ['**=', 3], ['^**=', 4],
-        ['~', 1], ['~@x', 1], ['*[1 2]', 1], ['f"{(a:b)}"', 5], ['{x:y}', 2],
+        ['~', 1], ['~@x', 1], ['*[1 2]', 1], ['f"{(a:b)}"', 5], ['{x:y}', 2], ["f\"{x!f''':{a.'''b", 17],
     ],
     // Intended: double-click selects a word wherever it stands.
     "a string's or comment's text holds no completion word, but double-click selects one there": [
         ["x'''", 4], ['; ab', 4], ['f"{{ab"', 6], ['f"{x!r}"', 5], ['f"{x:>10}"', 7], ['f"\\N{ab}"', 7], ["'''ab'''", 5],
-        ['f"""\n', '  text {x}', 4], ['"a\n', 'b"', 1], ['(print "ab', 10], ['f"{x!}"\n', '(print "abc")', 10],
-        ['x = f"{a:\n}"\n', '"abc"', 4], ['a;b', 3],
+        ['f"""\n', '  text {x}', 4], ['"a\n', 'b"', 1], ['(print "ab', 10], ['a;b', 3],
+        // Past a refusal the reader resumes in the literal's text, where a quote closes it and
+        // a later quote opens a string.
+        ['f"{x!r"}"{fo', 12], ['f"{x!rb"a"} fo', 14], ['f"{x!fr"a"} fo', 14], ['f"{x!ub"a"} fo', 14], ['f"{=:"" fo', 10],
+        ['f"{,=:"" fo', 11], ['f"{x:\\\n', '" fo', 4], ['f"{x:\\\r\n', '" fo', 4], ['f"{x:" fo', 9], ['f"""{x:"""" fo', 14],
+        ['f"{f\\"{x:\\"} fo', 15], ['f"{x!}"\n', '(print "abc")', 10], ['x = f"{a:\n}"\n', '"abc"', 4],
+        ['f"{x!}"\n"""doc\n', 'prose"""', 5],
     ],
     "an f/t-string field is a context read from the text's start (its delimiters and debug = end the word); a class per character knows none": [
         ['f"{x!r}"', 4], ['f"{x=}"', 4], ['f"{x =}"', 6], ['f"{x=}"', 5], ['t"{x!r}"', 4], ['f"""\n', '  Name: {name!r}', 13],
         ['f"""\n', '  {x=}', 4], ['f"{x!r}', 4], ['f"{a\\=}"', 5], ['f"""{x=', 6], ['f"""{x= ', 6], ['f"{x=\\', 4],
-        ['f"}"\n', 'f"{x!r}"', 4], ['f"{\\=}"', 4], ['f"{\\=}"', 5],
+        ['f"{\\=}"', 4], ['f"{\\=}"', 5],
+        // Read past a refusal, in the literal the reader resumes in.
+        ['f"}"\n', 'f"{x!r}"', 4], ['f"{z!} {y!r}"', 9], ['f"{x!}"\nf"""{a}\n', '{b!r}"""', 2],
     ],
     'a word starts after a string closed earlier in its run': [
         ["(f '''a-b''')", 12], ["f\"{'''a-b'''}\"", 12],
@@ -534,18 +549,32 @@ function exhaustiveLines(alphabet, maxLength) {
 }
 
 // The f/t-string reader's own characters: fields, conversions, specs, the debug =, escapes
-// (\, \N{), quotes, comments and line breaks, so its modes and refusals are exercised.
+// (\, \N{), quotes, comments and line breaks, so its modes and refusals are exercised; the
+// prefix letters in both cases, so a conversion name glued to a quote takes each prefix branch.
 const FIELD_ALPHABET = [
     'f', 'r', 't', 'N', 'x', 'a', '1', '{', '}', ':', '!', '=', '\\', '"', "'", '(', ')', '[', ']', ';',
-    ' ', '\n', '\r', '>', '-', '.', '_', '\u{1D465}',
+    ' ', '\n', '\r', '>', '-', '.', '_', '\u{1D465}', 'b', 'u', 's', 'R', 'B', 'F',
 ];
 // How a field text starts: in a literal, in its field, raw, a t-string, a triple-quoted
-// string, at a conversion (a valid name, so what follows it is what the reader checks).
-const FIELD_STARTS = ['f"', 'f"{', 'rf"', 't"', "'''", "f'''{", 'f"{x', '"', '', 'f"{x!r', 'f"{x!a'];
+// string, at a conversion (a valid name, so what follows it is what the reader checks; or
+// none, so the name is random; or a string prefix in either case, which a quote may follow,
+// also in a literal that quote does not close, so the refusal's span shows in the resume).
+const FIELD_STARTS = [
+    'f"', 'f"{', 'rf"', 't"', "'''", "f'''{", 'f"{x', '"', '', 'f"{x!r', 'f"{x!a', 'f"{x!', 'f"{x!b', 'f"{x!Rb', 'f"{x!F',
+    'f"{x!U', 'f"{x!bR', 'f"{x!Fr', "f'''{x!Fr", 'f"""{x!rf',
+];
+// Lines the reader refuses, a refusal of each kind (a bad conversion name, a single }, a
+// leading =, an empty conversion, a conversion string, a quote in a spec, a bare " in an
+// escaped literal), some leaving a literal open for the lines below.
+const REFUSED_LINES = [
+    'f"{x!z}"', 'f"}"', 'f"{=}"', 'f"{x!}"', 'f"{x!}"\n"""doc', 'f"{x!r"a"}"', 'f"{x:"', 'f"""{x!}',
+    'f"{f\\"a"}"', 'f"""}', 'f"{x!f"a"}', 'f"{x! r}"',
+];
 
 /**
  * The corpus: every short lexer line, random short lines, lines over 15 columns, and texts
- * of several lines: random lines, and random field texts from FIELD_STARTS.
+ * of several lines: random lines, random field texts from FIELD_STARTS, and a REFUSED_LINES
+ * line followed by random lines, read past its refusal.
  */
 function corpus() {
     const random = prng(1184);
@@ -563,6 +592,11 @@ function corpus() {
     const texts = [];
     for (let i = 0; i < 100; i++) texts.push(`${line(1, 6)}\n${line(1, 6)}`);
     for (let i = 0; i < 3000; i++) texts.push(pick(FIELD_STARTS) + chars(FIELD_ALPHABET, 1, 12));
+    // A refused line, then lines read past it as the reader recovers.
+    for (let i = 0; i < 600; i++) {
+        const below = i % 2 ? chars(FIELD_ALPHABET, 1, 10) : `${line(1, 6)}\n${pick(FIELD_STARTS)}${chars(FIELD_ALPHABET, 0, 8)}`;
+        texts.push(`${pick(REFUSED_LINES)}\n${below}`);
+    }
     return { lines, texts };
 }
 
@@ -575,12 +609,12 @@ function carets(text) {
 
 /**
  * Whether the wordPattern can know the completion word at `caret` of the one-line `text`: the
- * caret is in top-level code with no string closed before it on the line (the regex re-lexes
- * the run from its start as code), or the reader refuses the text (the line is then code).
+ * caret is in top-level code with no string closed and no refusal recovered from before it on
+ * the line (the regex re-lexes the run from its start as code).
  */
 function wordPatternReads(core, text, caret, rule) {
     const found = core.caretContext(text, caret, rule);
-    return found === null || (found.context === 'code' && found.resume === 0);
+    return found.context === 'code' && found.resume === 0;
 }
 
 buildTest('fuzz: the wordPattern word is the completionWordSpan word, and never empty', (core) => {
@@ -611,29 +645,23 @@ function runPython(args, input) {
     return r.stdout;
 }
 
-// Reads [[before, line, col], ...] (code points) as JSON on stdin; writes, per query, its
-// caret_context's context and resume (where the reader refuses the text before the caret,
-// null and the error's message, null when it stopped with none) and the completion_word_span.
+// Reads [[before, line, col], ...] (code points) as JSON on stdin; writes, per query, whether
+// the reader refuses the text before the caret and the text before its line (caret_context
+// None), the context and resume of its recovered reading (_recovered_context, caret_context's
+// where it refuses nothing) and the completion_word_span.
 const SPANS_PY = `
 import json, sys
-from lispy.core.parser import caret_context, caret_tokens, completion_word_span
+from lispy.core.parser import _recovered_context, caret_context, completion_word_span
 queries = json.loads(sys.stdin.buffer.read().decode("utf-8"))
 out = []
 for before, line, col in queries:
-    found = caret_context(before + line, len(before) + col)
-    span = completion_word_span(line, col, before)
-    if found is None:
-        tokens = caret_tokens(line, col, before)
-        out.append([None, tokens[-1][0] if tokens and tokens[-1][1] == "error" else None, span])
-    else:
-        out.append([found[0], found[1], span])
+    text, offset = before + line, len(before) + col
+    context, resume, _ = _recovered_context(text, offset)
+    refused = caret_context(text, offset) is None
+    above = caret_context(before, len(before)) is None
+    out.append([refused, above, context, resume, completion_word_span(line, col, before)])
 json.dump(out, sys.stdout)
 `;
-
-// The one refusal caretContext does not make: a conversion name other than s, r and a, a
-// set the spec does not publish (a client need not agree on a text the reader refuses).
-// lispython card TASK-1362 asks for the set to be published.
-const UNPORTED_REFUSAL = "expected 's', 'r', or 'a'";
 
 /** The lexer's line breaks (split_lines). */
 const LINE_BREAK = /\r\n|\r|\n/g;
@@ -652,7 +680,7 @@ function lineInput(text, caret) {
     return [text.slice(0, lineStart), text.slice(lineStart), caret - lineStart];
 }
 
-buildTest('fuzz: caretContext and completionWordSpan are lispython\'s caret_context and completion_word_span', (core, t) => {
+buildTest('fuzz: caretContext and completionWordSpan are lispython\'s recovered reading and completion_word_span, refused texts included', (core, t) => {
     if (checkout === undefined) return t.skip(lispythonMissing);
     const rule = core.wordBoundaryRule();
     const { lines, texts } = corpus();
@@ -666,22 +694,13 @@ buildTest('fuzz: caretContext and completionWordSpan are lispython\'s caret_cont
     const asCodePoints = ({ input: [before, line, col] }) => [before, line, codePoints(line, col)];
     const answers = JSON.parse(runPython(['-c', SPANS_PY], JSON.stringify(queries.map(asCodePoints))));
     assert.strictEqual(answers.length, queries.length);
-    const seen = { checked: 0, text: 0, field: 0, multiLine: 0, refused: 0, lineAlone: 0 };
+    const seen = { checked: 0, text: 0, field: 0, multiLine: 0, recovered: 0, recoveredBelow: 0 };
     queries.forEach(({ text, caret, input: [before, line] }, i) => {
-        const [context, resume, span] = answers[i];
+        const [refused, above, context, resume, span] = answers[i];
         const scanned = before + line;
         const at = show(text, caret);
-        if (context === null) {
-            // The reader refuses the text before the caret: so does caretContext, but for
-            // the unported check, where the word is no concern (the client need not agree).
-            if (resume !== null && resume.includes(UNPORTED_REFUSAL)) return;
-            assert.strictEqual(core.caretContext(scanned, caret, rule), null, `caretContext ${at}, refused: ${resume}`);
-            seen.refused++;
-            // Then the word is the line-alone reading's (_line_context), compared below.
-            if (before !== '') seen.lineAlone++;
-        } else {
-            assert.deepStrictEqual(core.caretContext(scanned, caret, rule), { context, resume: utf16(scanned, resume) }, `caretContext ${at}`);
-        }
+        assert.deepStrictEqual(core.caretContext(scanned, caret, rule), { context, resume: utf16(scanned, resume) },
+            `caretContext ${at}${refused ? ' (refused)' : ''}`);
         // The whole text: what follows the caret's line is never read.
         const got = core.completionWordSpan(text, caret, rule);
         const expected = span === null ? null : span.map((cp) => before.length + utf16(line, cp));
@@ -690,10 +709,13 @@ buildTest('fuzz: caretContext and completionWordSpan are lispython\'s caret_cont
         if (context === 'text') seen.text++;
         if (context === 'field' || context === 'bracket') seen.field++;
         if (before !== '') seen.multiLine++;
+        if (refused) seen.recovered++;
+        // The text before the caret's line is refused already: the line is read past it.
+        if (refused && above) seen.recoveredBelow++;
     });
-    // The corpus reaches what the field alphabet is there for.
-    assert.ok(seen.checked > 50000 && seen.text > 10000 && seen.field > 4000 && seen.multiLine > 4000 && seen.refused > 1000
-        && seen.lineAlone > 100, JSON.stringify(seen));
+    // The corpus reaches what the field alphabet and the refused lines are there for.
+    assert.ok(seen.checked > 50000 && seen.text > 10000 && seen.field > 4000 && seen.multiLine > 4000
+        && seen.recovered > 5000 && seen.recoveredBelow > 3000, JSON.stringify(seen));
 });
 
 // --- the pinned spec and its derived files are current --------------------------------
