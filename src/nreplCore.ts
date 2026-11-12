@@ -760,123 +760,380 @@ export function linkifyErrors(text: string): string {
 export { wordBoundaryRule };
 export type WordBoundaryRule = ReturnType<typeof wordBoundaryRule>;
 
+/** What a caret lies in, as lispython's reader reads it (caretContext). */
+export interface CaretContext {
+    /**
+     * `code` (top-level code), `field` (an f/t-string field's own level), `bracket` (inside a
+     * field's brackets) or `text` (a string's body, a literal's or format spec's text, a
+     * conversion, a comment).
+     */
+    context: 'code' | 'field' | 'bracket' | 'text';
+    /** Where the last string or literal closed before the offset ends (0 when none). */
+    resume: number;
+}
+
+/**
+ * Past the whitespace and backslash continuations (a backslash before a line break or the
+ * end of `text`) at UTF-16 offset `i` of `text`, as lispython's _skip_blanks skips them
+ * between tokens. Injected into the webview: caretContext and completionWordSpan call it.
+ */
+export function fieldBlanksEnd(text: string, i: number, rule: WordBoundaryRule): number {
+    while (i < text.length) {
+        if (rule.whitespace.includes(text[i])) i++;
+        else if (text[i] === rule.backslash && (i + 1 === text.length || rule.lineBreakChars.includes(text[i + 1]))) i++;
+        else break;
+    }
+    return i;
+}
+
+/**
+ * The context of UTF-16 offset `offset` (a caret) of `text`, by lispython's caret_context
+ * (`_Lexer` run with a stop offset, src/lispy/core/parser.py): one pass over `text` from its
+ * start over a stack of the f/t literals and fields open, ending where it would read at or
+ * past the offset (spec steps 2-6). Null where the reader refuses the text before the offset:
+ * a single `}` in a literal's text, the closing quote inside a format spec, a line break in a
+ * single-quoted literal's spec text, a leading `=` in a field, a bare `"` in an escaped
+ * string, an unterminated literal, or a malformed conversion. A conversion's name is not
+ * checked against s, r and a: the spec does not publish that set, and a client need not agree
+ * on a text the reader refuses. The lexer reads past the offset where lispython's does (to a
+ * string's closing quote), so `text` must end where the caller's scan ends.
+ * Injected into the webview, so self-contained but for the injected fieldBlanksEnd.
+ */
+export function caretContext(text: string, offset: number, rule: WordBoundaryRule): CaretContext | null {
+    interface Literal { kind: 'literal'; raw: boolean; quote: string }
+    interface Field { kind: 'field'; literal: Literal; brackets: string[]; spec: boolean; nested: boolean; first: number }
+    const src = text;
+    const n = src.length;
+    const tokenRegex = {
+        code: new RegExp(rule.codeToken, 'gu'),
+        field: new RegExp(rule.fieldToken, 'gu'),
+        bracket: new RegExp(rule.bracketToken, 'gu'),
+    };
+    const delimiter = new RegExp(rule.fieldDelimiter, 'uy');
+    const stringPrefix = new RegExp(rule.stringPrefix, 'uy');
+    const wordChar = new RegExp(rule.wordChar, 'uy');
+    const [fieldOpen, fieldClose] = [rule.fieldBraces[0], rule.fieldBraces[1]];
+    const matchesAt = (re: RegExp, i: number) => {
+        re.lastIndex = i;
+        return re.test(src);
+    };
+    const stack: (Literal | Field)[] = [];
+    // `emitted` counts the tokens lispython's lexer emits, so a field whose count has not
+    // moved since its `{` has no expression yet (a leading `=` is refused there).
+    const state = { pos: 0, emitted: 0, closedStringEnd: 0, done: false, context: null as CaretContext['context'] | null };
+    const pastStop = (i: number) => i >= offset;
+    const reached = (context: CaretContext['context']) => {
+        state.context = context;
+        state.done = true;
+    };
+    const refuse = () => {
+        state.done = true;
+    };
+
+    // scan_string_body: why the body read from `i` stopped ('quote', 'field', 'close',
+    // 'mixed', 'eof') and where.
+    const scanBody = (i: number, quote: string, raw: boolean, interpolated: boolean, doubled: string): [string, number] => {
+        const escaped = quote[0] === rule.backslash;
+        const stops = interpolated ? rule.interpolatedBodyStops : rule.plainBodyStops;
+        for (;;) {
+            while (i < n && !stops.includes(src[i])) i++;
+            if (i >= n) return ['eof', n];
+            const c = src[i];
+            if (c === rule.backslash) {
+                if (escaped && src.startsWith(quote, i)) return ['quote', i];
+                if (i + 1 >= n) i += 1;
+                else if (escaped && src.startsWith(rule.escapedQuote, i + 1)) i += 1 + rule.escapedQuote.length;
+                else if (!raw && src.startsWith(rule.namedEscape[0], i + 1)) {
+                    const close = src.indexOf(rule.namedEscape[1], i + 1 + rule.namedEscape[0].length);
+                    i = (close < 0 ? n - 1 : close) + 1;
+                } else if (interpolated && rule.fieldBraces.includes(src[i + 1])) i += 1;
+                else i += (src.codePointAt(i + 1) as number) > 0xffff ? 3 : 2; // with the next code point
+            } else if (rule.quoteChars.includes(c)) {
+                if (escaped && c === rule.bareQuote) return ['mixed', i];
+                if (src.startsWith(quote, i)) return ['quote', i];
+                i += 1;
+            } else if (src.startsWith(c, i + 1) && doubled.includes(c)) {
+                i += 2;
+            } else {
+                return [c === fieldOpen ? 'field' : 'close', i];
+            }
+        }
+    };
+    // _spec_line_break: the first line break in src[start, end) not after an odd run of
+    // backslashes (a continuation), or null. CRLF is one break, as the lexer's lines are.
+    const specLineBreak = (start: number, end: number) => {
+        for (let j = start; j < end; j++) {
+            if (!rule.lineBreakChars.includes(src[j])) continue;
+            let run = j;
+            while (run > start && src[run - 1] === rule.backslash) run--;
+            if ((j - run) % 2 === 0) return j;
+            if (src[j] === '\r' && j + 1 < end && src[j + 1] === '\n') j++;
+        }
+        return null;
+    };
+    const openField = (literal: Literal, at: number) => {
+        state.emitted++;
+        stack.push({ kind: 'field', literal, brackets: [], spec: false, nested: false, first: state.emitted });
+        state.pos = at + 1;
+    };
+    const closeField = (at: number) => {
+        state.emitted++;
+        stack.pop();
+        state.pos = at + 1;
+    };
+    // _conversion, short of checking the name: the conversionEnds character the `!` at
+    // `bang` ends at, or null where the reader refuses it (no name right after the `!`, or
+    // anything but blanks between the name and a conversionEnds character, a string
+    // included, which _string_after_bang always refuses).
+    const conversion = (bang: number) => {
+        let nameEnd = bang + 1;
+        while (nameEnd < n && matchesAt(wordChar, nameEnd)) nameEnd = wordChar.lastIndex;
+        if (nameEnd === bang + 1) return null;
+        const rest = fieldBlanksEnd(src, nameEnd, rule);
+        return rest < n && rule.conversionEnds.includes(src[rest]) ? rest : null;
+    };
+    // _delimiter: the field's expression ends at the `}`, `:` or `!` at `at`.
+    const delimiterAt = (field: Field, at: number) => {
+        state.emitted++;
+        if (src[at] === fieldClose) return closeField(at);
+        if (src[at] === '!') {
+            // The conversion ends at the first conversionEnds character after the `!`: with
+            // none before the offset, the offset is in its text.
+            let end = at + 1;
+            while (end < offset && !rule.conversionEnds.includes(src[end])) end++;
+            if (end >= offset) return reached('text');
+            const rest = conversion(at);
+            if (rest === null) return refuse();
+            if (src[rest] === fieldClose) return closeField(rest);
+            at = rest;
+        }
+        field.spec = true;
+        state.pos = at + 1;
+    };
+    // _string: a plain string is read whole; an f/t-string opens a literal.
+    const string = (start: number, opening: string) => {
+        stringPrefix.lastIndex = 0;
+        const written = (stringPrefix.exec(opening) as RegExpExecArray)[0];
+        const quote = opening.slice(written.length);
+        const prefix = written.toLowerCase(); // may change its length (İ)
+        const raw = prefix.includes(rule.rawLetter);
+        state.emitted++;
+        if (!rule.kindLetters.some((letter) => prefix.includes(letter))) {
+            const [stop, at] = scanBody(start + opening.length, quote, raw, false, rule.fieldBraces);
+            const closed = stop === 'quote' ? at + quote.length - 1 : n;
+            if (pastStop(closed) && (stop !== 'mixed' || pastStop(at))) return reached('text');
+            if (stop !== 'quote') return refuse();
+            state.pos = state.closedStringEnd = at + quote.length;
+            return;
+        }
+        stack.push({ kind: 'literal', raw, quote });
+        state.pos = start + opening.length;
+    };
+    // _token: one token at the top level or in a field's expression.
+    const token = (field: Field | null) => {
+        const mode = field === null ? 'code' : field.brackets.length ? 'bracket' : 'field';
+        const re = tokenRegex[mode];
+        re.lastIndex = state.pos;
+        const m = re.exec(src);
+        if (pastStop(m === null ? n : m.index)) return reached(mode);
+        if (m === null) return refuse();
+        const start = m.index;
+        if (field !== null && mode === 'field') {
+            // The debug `=` (the spec's prose): alone, it is no expression.
+            if (src[start] === '=' && state.emitted === field.first && !src.startsWith('=', start + 1)) return refuse();
+            if (src[start] === fieldClose || matchesAt(delimiter, start)) return delimiterAt(field, start);
+        }
+        const tk = m[0];
+        const type = rule.tokenLabels[m.slice(1).findIndex((group) => group !== undefined)];
+        const end = start + tk.length;
+        // A token holding the offset: a comment's text (its end included), else code.
+        if (type === 'comment' ? pastStop(end) : end > offset) return reached(type === 'comment' ? 'text' : mode);
+        if (type === 'string') return string(start, tk);
+        if (field !== null) {
+            const last = tk[tk.length - 1];
+            if (type === 'opening' || (type === 'bad-prefix' && rule.openings.includes(last))) field.brackets.push(last);
+            else if (type === 'closing' && field.brackets.length) field.brackets.pop();
+        }
+        // A comma emits a token only right after an opening, which emitted one already.
+        if (type !== 'new-line' && type !== 'spaces' && type !== 'comment' && type !== 'comma') state.emitted++;
+        state.pos = end;
+    };
+    // _body: literal text of an f/t-string or of a field's format spec, up to what ends it.
+    const body = (top: Literal | Field) => {
+        const [literal, spec] = top.kind === 'literal' ? [top, null] : [top.literal, top];
+        if (pastStop(state.pos)) return reached('text');
+        const doubled = spec === null ? rule.fieldBraces : spec.nested ? fieldOpen : '';
+        const [stop, at] = scanBody(state.pos, literal.quote, literal.raw, true, doubled);
+        // A single-quoted literal's spec text holds no line break.
+        const singleQuoted = spec !== null && literal.quote.split(rule.backslash).join('').length === 1;
+        const brk = singleQuoted ? specLineBreak(state.pos, at) : null;
+        // The text holds the offset: up to its quote's end, or before what else ends it; a
+        // line break or a bare " before the offset is refused first.
+        const end = stop === 'quote' ? at + literal.quote.length - 1 : at;
+        if (pastStop(end) && !((brk !== null && !pastStop(brk)) || (stop === 'mixed' && !pastStop(at)))) return reached('text');
+        if (brk !== null || stop === 'mixed' || stop === 'eof' || (stop === 'quote' && spec !== null)) return refuse();
+        state.emitted++;
+        if (stop === 'quote') {
+            state.pos = state.closedStringEnd = at + literal.quote.length;
+            stack.pop();
+        } else if (stop === 'field') {
+            if (spec !== null) spec.nested = true;
+            openField(literal, at);
+        } else if (spec === null) {
+            refuse(); // a single } in a literal's own text
+        } else {
+            closeField(at);
+        }
+    };
+
+    while (!state.done) {
+        const top = stack.length ? stack[stack.length - 1] : null;
+        if (top === null) token(null);
+        else if (top.kind === 'field' && !top.spec) token(top);
+        else body(top);
+    }
+    return state.context === null ? null : { context: state.context, resume: state.closedStringEnd };
+}
+
 /**
  * The completion word around `caret` in `text` (UTF-16 offsets in and out), by lispython's
  * published word boundary spec (`python -m lispy.word_boundary`, pinned in
- * test/word-boundary.json): its `steps` are the algorithm below, its `rule` the tables in
- * `rule`. `start` is where the typed prefix starts (dotted: `heapq.nl`), `replaceStart`
- * after its last `.`, `end` at the next `.` or the token's end; `leafStart` is where the
- * token's peeled front (`:`, `*`, leading signs) ends. A word that is empty at the caret
- * (in a string opening, after `(`) has all four at `caret`. `\n` is a stop, form-end and
- * number-end character, so a multi-line text behaves as the caret's line.
- * Injected into the webview, so self-contained: `rule` (wordBoundaryRule()) is a
- * parameter because a call to an imported function does not survive toString in the
- * unbundled build.
+ * test/word-boundary.json): its `steps` are the algorithm below and in caretContext, its
+ * `rule` the tables in `rule`. `text` is any text holding the caret's whole line (a
+ * document's, a textarea's): the caret's context is read from the text's start (a field of an
+ * f-string opened lines above, a string still open), and nothing after the caret's line is
+ * read, as lispython scans only the text before the line and the line. Null where the caret
+ * is in a string's or comment's text (no word: offer no completion). `start` is where the
+ * typed prefix starts (dotted: `heapq.nl`), `replaceStart` after its last `.`, `end` at the
+ * next `.` or the token's end; `leafStart` is where the token's peeled front (`:`, `*`,
+ * leading signs) ends. A word that is empty at the caret (in a string opening, after `(`) has
+ * all four at `caret`.
+ * Injected into the webview, so self-contained but for the injected caretContext and
+ * fieldBlanksEnd: `rule` (wordBoundaryRule()) is a parameter because a call to an imported
+ * function does not survive toString in the unbundled build.
  */
 export function completionWordSpan(text: string, caret: number, rule: WordBoundaryRule):
-    { start: number; replaceStart: number; end: number; leafStart: number } {
-    const isStop = (i: number) => i >= 0 && i < text.length && rule.stopChars.includes(text[i]);
-    const atFormEnd = (i: number) => i >= text.length || rule.formEndChars.includes(text[i]);
-    const longestFirst = (xs: string[]) => [...xs].sort((a, b) => b.length - a.length);
-    const combos = (heads: string[], tails: string[]) =>
-        longestFirst(heads.flatMap((h) => tails.map((t) => h + t)));
-    const escape = (s: string) => s.replace(/[\\^$.*+?()[\]{}|/]/g, '\\$&');
+    { start: number; replaceStart: number; end: number; leafStart: number } | null {
+    // The caret's line, where the lexer ends lines (LF, CR, CRLF), and its context
+    // (_line_context): the scan from the text's start; where the reader refuses that, the
+    // line alone (resume then counted from the line's start); where it refuses that too, code.
+    const isBreak = (c: string) => rule.lineBreakChars.includes(c);
+    let lineStart = caret;
+    while (lineStart > 0 && !isBreak(text[lineStart - 1])) lineStart--;
+    let lineEnd = caret;
+    while (lineEnd < text.length && !isBreak(text[lineEnd])) lineEnd++;
+    const line = text.slice(lineStart, lineEnd);
+    const col = caret - lineStart;
+    // lispython scans the text before the line and the line, never past it. Reading on
+    // would give no other context (all it reads there lies past the caret, and every
+    // lookahead taking the line's end takes a line break too), only a longer scan: a
+    // string's body read to its close at the document's end.
+    let found = caretContext(text.slice(0, lineEnd), caret, rule);
+    let resume = found === null ? 0 : Math.max(found.resume - lineStart, 0);
+    // On the first line, the line alone is the scan just refused.
+    if (found === null && lineStart > 0) {
+        found = caretContext(line, col, rule);
+        if (found !== null) resume = found.resume;
+    }
+    const context = found === null ? 'code' : found.context;
+    if (context === 'text') return null;
+
+    const isStop = (c: string) => rule.stopChars.includes(c);
     const sticky = (source: string) => new RegExp(source, 'uy');
     const whole = (source: string) => new RegExp(`^(?:${source})$`, 'u');
-    const matchEnd = (re: RegExp, i: number) => {
+    const matchesAt = (re: RegExp, s: string, i: number) => {
         re.lastIndex = i;
-        const m = re.exec(text);
-        return m === null ? -1 : i + m[0].length;
+        return re.test(s);
+    };
+    const tokenRegex = sticky(context === 'code' ? rule.codeToken : context === 'field' ? rule.fieldToken : rule.bracketToken);
+    const delimiter = sticky(rule.fieldDelimiter);
+    const isWordType = (type: string) => type === 'symbol' || type === 'number';
+
+    // The word token (run_tokens, _word_token): lex the line from `from` with the context's
+    // patterns, the line ending at `endpos` (for every lookahead too), until a token reaches
+    // or passes the run's end; the first that ends after the caret, or at it as a word.
+    const wordToken = (from: number, endpos: number) => {
+        const s = line.slice(0, endpos);
+        let runEnd = from;
+        while (runEnd < endpos && !isStop(s[runEnd])) runEnd++;
+        for (let pos = from; pos < runEnd;) {
+            tokenRegex.lastIndex = pos;
+            const m = tokenRegex.exec(s);
+            if (m === null) return null; // never: the symbol or spaces pattern takes any run character
+            const end = pos + m[0].length;
+            const type = rule.tokenLabels[m.slice(1).findIndex((group) => group !== undefined)];
+            // In a field, a delimiter met first: the caret is past the expression.
+            if (context === 'field' && matchesAt(delimiter, line, pos)) return null;
+            if (end > col || (end === col && isWordType(type))) return { start: pos, end, type };
+            pos = end;
+        }
+        return null;
+    };
+    // _debug_equals_p: the symbol ending at `end` ends in the `=` of `{x=}`: an `=` after no
+    // debugBlockers character, then only blanks to a field close, a delimiter or the line's end.
+    const debugEquals = (end: number) => {
+        if (end < 2 || line[end - 1] !== '=' || rule.debugBlockers.includes(line[end - 2])) return false;
+        const at = fieldBlanksEnd(line, end, rule);
+        return at === line.length || line[at] === rule.fieldBraces[1] || matchesAt(delimiter, line, at);
     };
 
-    // The run: the stretch around the caret holding no stop character.
-    let runStart = caret;
-    while (runStart > 0 && !isStop(runStart - 1)) runStart--;
-    let runEnd = caret;
-    while (runEnd < text.length && !isStop(runEnd)) runEnd++;
-
-    // Lex from the run's start: each kind in the spec's order, its entries longest first.
-    const openings = combos(rule.wrappers, rule.openings);
-    const dangling = combos(rule.wrappers, rule.danglingQuotes);
-    const metas = combos(rule.wrappers, rule.metaChars);
-    const badTails = longestFirst([...rule.openings, ...rule.metaChars]);
-    const stringOpening = sticky(`${rule.stringPrefix}(?:${rule.stringOpenings.map(escape).join('|')})`);
-    const number = sticky(`(?:${rule.numberToken})(?![^${rule.numberEndClass}])`);
-    const lexAt = (i: number): ['symbol' | 'number' | 'other', number] => {
-        const at = (entries: string[], ok: (end: number) => boolean) =>
-            entries.find((e) => text.startsWith(e, i) && ok(i + e.length));
-        const opening = at(openings, () => true);
-        if (opening !== undefined) return ['other', i + opening.length];
-        const stringEnd = matchEnd(stringOpening, i);
-        if (stringEnd >= 0) return ['other', stringEnd];
-        const quote = at(dangling, atFormEnd) ?? at(metas, (end) => !atFormEnd(end));
-        if (quote !== undefined) return ['other', i + quote.length];
-        // A bad prefix: ^ and one or more *, then an opening or meta entry, or before a stop.
-        if (text.startsWith('^*', i)) {
-            let j = i + 1;
-            while (text[j] === '*') j++;
-            const tail = badTails.find((e) => text.startsWith(e, j));
-            if (tail !== undefined) return ['other', j + tail.length];
-            if (j >= text.length || isStop(j)) return ['other', j];
-        }
-        const numberEnd = matchEnd(number, i);
-        if (numberEnd >= 0) return ['number', numberEnd];
-        return ['symbol', runEnd];
-    };
-    // The word token: the first that ends after the caret, or at it as a symbol or number.
-    let token: { start: number; end: number; isNumber: boolean } | undefined;
-    for (let i = runStart; i < runEnd;) {
-        const [kind, end] = lexAt(i);
-        if (end > caret || (end === caret && kind !== 'other')) {
-            if (kind !== 'other') token = { start: i, end, isNumber: kind === 'number' };
-            break;
-        }
-        i = end;
+    const empty = { start: caret, replaceStart: caret, end: caret, leafStart: caret };
+    // The run: the stretch around the caret holding no stop character, from resume at the earliest.
+    let runStart = col;
+    while (runStart > 0 && !isStop(line[runStart - 1])) runStart--;
+    let token = wordToken(Math.max(runStart, resume), line.length);
+    if (token === null || !isWordType(token.type)) return empty;
+    if (context === 'field' && token.type === 'symbol' && debugEquals(token.end)) {
+        // The reader lexes the expression again without its `=`: a\= is a then a continuation.
+        token = wordToken(token.start, token.end - 1);
+        if (token === null || !isWordType(token.type) || token.end < col) return empty;
     }
-    if (token === undefined) return { start: caret, replaceStart: caret, end: caret, leafStart: caret };
 
     // Peel the token's front, repeatedly.
     const numberWhole = whole(rule.numberToken);
     const signedComplexWhole = whole(rule.signedComplex);
     const alnum = sticky(rule.alnum);
+    const tokenEnd = token.end;
     let leafStart = token.start;
-    let isNumber = token.isNumber;
+    let isNumber = token.type === 'number';
     for (;;) {
-        const rest = text.slice(leafStart, token.end);
+        const rest = line.slice(leafStart, tokenEnd);
         if (rule.neverPeeled.includes(rest)) break;
         if (isNumber && (!rule.signs.some((s) => rest.startsWith(s)) || signedComplexWhole.test(rest))) break;
         if ([...rest].length < 2) break;
         const prefix = rule.tokenPrefixes.find((p) => rest.startsWith(p));
         if (prefix !== undefined) {
             leafStart += prefix.length;
-            if (numberWhole.test(text.slice(leafStart, token.end))) isNumber = true;
+            if (numberWhole.test(line.slice(leafStart, tokenEnd))) isNumber = true;
             continue;
         }
         let signsEnd = leafStart;
-        for (let s; (s = rule.signs.find((x) => text.startsWith(x, signsEnd))) !== undefined;) signsEnd += s.length;
-        if (signsEnd > leafStart && signsEnd < token.end
-            && (matchEnd(alnum, signsEnd) >= 0 || rule.signPeelFollowers.some((f) => text.startsWith(f, signsEnd)))) {
+        for (let s; (s = rule.signs.find((x) => line.startsWith(x, signsEnd))) !== undefined;) signsEnd += s.length;
+        if (signsEnd > leafStart && signsEnd < tokenEnd
+            && (matchesAt(alnum, line, signsEnd) || rule.signPeelFollowers.some((f) => line.startsWith(f, signsEnd)))) {
             leafStart = signsEnd;
             continue;
         }
         break;
     }
 
-    const start = caret < leafStart ? token.start : leafStart;
-    const dot = caret > start ? text.lastIndexOf('.', caret - 1) : -1;
+    const start = col < leafStart ? token.start : leafStart;
+    const dot = col > start ? line.lastIndexOf('.', col - 1) : -1;
     const replaceStart = dot >= start ? dot + 1 : start;
-    const nextDot = text.indexOf('.', caret);
-    const end = nextDot >= 0 && nextDot < token.end ? nextDot : token.end;
-    return { start, replaceStart, end, leafStart };
+    const nextDot = line.indexOf('.', col);
+    const end = nextDot >= 0 && nextDot < tokenEnd ? nextDot : tokenEnd;
+    return { start: lineStart + start, replaceStart: lineStart + replaceStart, end: lineStart + end, leafStart: lineStart + leafStart };
 }
 
 /**
  * Start of the completion prefix that ends at `caret` in `text`: completionWordSpan's
  * dotted start (the nREPL server answers with `word` for the replace start, see
- * nreplReplaceStart). The one boundary rule for editor and panel completion.
+ * nreplReplaceStart), or null where the caret is in a string's or comment's text (offer no
+ * completion). The one boundary rule for editor and panel completion.
  */
-export function symbolPrefixStart(text: string, caret: number, rule: WordBoundaryRule): number {
-    return completionWordSpan(text, caret, rule).start;
+export function symbolPrefixStart(text: string, caret: number, rule: WordBoundaryRule): number | null {
+    const span = completionWordSpan(text, caret, rule);
+    return span === null ? null : span.start;
 }
 
 /**
@@ -1120,6 +1377,7 @@ export function getReplHtml(
     const caret = input.selectionStart;
     if (caret !== input.selectionEnd) return false;
     const start = symbolPrefixStart(input.value, caret, wordBoundaryRule());
+    if (start === null) return false;
     const prefix = input.value.slice(start, caret);
     if (prefix === '') return false;
     completionSeq += 1;
@@ -1212,6 +1470,10 @@ export function getReplHtml(
   ${injectWebviewFunction(linkifyErrors, 'linkifyErrors')}
 
   ${injectWebviewFunction(wordBoundaryRule, 'wordBoundaryRule')}
+
+  ${injectWebviewFunction(fieldBlanksEnd, 'fieldBlanksEnd')}
+
+  ${injectWebviewFunction(caretContext, 'caretContext')}
 
   ${injectWebviewFunction(completionWordSpan, 'completionWordSpan')}
 

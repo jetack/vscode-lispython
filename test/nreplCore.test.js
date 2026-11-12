@@ -349,15 +349,30 @@ webviewTest('webview: Tab completes the symbol before the caret', (core) => {
     assert.ok(w.els.candidates.textContent.includes('printf'));
 });
 
+webviewTest('webview: Tab in a string\'s or comment\'s text asks for no completion', (core) => {
+    const w = loadReplWebview(core);
+    for (const text of ['(print "fo', '(f "a\nfo', 'x ; fo', 'f"{x!fo']) {
+        w.type(text);
+        const sent = w.posted.length;
+        assert.strictEqual(w.key('Tab').defaultPrevented, false, JSON.stringify(text));
+        assert.strictEqual(w.posted.length, sent, JSON.stringify(text));
+    }
+    // A field of an f-string is code: its word completes.
+    w.type('f"{fo');
+    w.key('Tab');
+    assert.strictEqual(w.posted.at(-1).prefix, 'fo');
+});
+
 webviewTest('webview: the injected symbolPrefixStart is the core one on every word boundary spec case', (core) => {
     const vm = require('node:vm');
     const w = loadReplWebview(core);
     const spec = JSON.parse(fs.readFileSync(path.join(__dirname, 'word-boundary.json'), 'utf8'));
     for (const c of spec.cases) {
-        const caret = [...c.text].slice(0, c.caret).join('').length;
+        const text = c.before + c.text;
+        const caret = c.before.length + [...c.text].slice(0, c.caret).join('').length;
         const injected = vm.runInContext(
-            `symbolPrefixStart(${JSON.stringify(c.text)}, ${caret}, wordBoundaryRule())`, w.ctx);
-        assert.strictEqual(injected, core.symbolPrefixStart(c.text, caret, core.wordBoundaryRule()), JSON.stringify(c));
+            `symbolPrefixStart(${JSON.stringify(text)}, ${caret}, wordBoundaryRule())`, w.ctx);
+        assert.strictEqual(injected, core.symbolPrefixStart(text, caret, core.wordBoundaryRule()), JSON.stringify(c));
     }
 });
 

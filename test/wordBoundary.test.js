@@ -1,7 +1,7 @@
 // vsc-lispy's completion word boundary against lispython's published spec
-// (test/word-boundary.json, `python -m lispy.word_boundary`): completionWordSpan and
-// symbolPrefixStart directly, and the language-configuration.json wordPattern through
-// VS Code's own word lookup.
+// (test/word-boundary.json, `python -m lispy.word_boundary`): caretContext,
+// completionWordSpan and symbolPrefixStart directly, and the language-configuration.json
+// wordPattern through VS Code's own word lookup.
 const test = require('node:test');
 const assert = require('node:assert');
 const fs = require('fs');
@@ -33,10 +33,23 @@ const utf16 = (text, cp) => [...text].slice(0, cp).join('').length;
 /** Code point column of UTF-16 offset `u` in `text`. */
 const codePoints = (text, u) => [...text.slice(0, u)].length;
 
-/** The spec case in UTF-16 offsets. */
+/** The spec case in UTF-16 offsets of its line (null bounds stay null). */
 function utf16Case(c) {
-    const at = (cp) => utf16(c.text, cp);
-    return { text: c.text, caret: at(c.caret), start: at(c.start), replaceStart: at(c.replaceStart), end: at(c.end) };
+    const at = (cp) => (cp === null ? null : utf16(c.text, cp));
+    return { before: c.before, text: c.text, caret: at(c.caret), start: at(c.start), replaceStart: at(c.replaceStart), end: at(c.end) };
+}
+
+/** The spec case's input as completionWordSpan takes it: the text before the line and the line, and the caret in it. */
+const caseInput = (c) => ({ text: c.before + c.text, caret: c.before.length + c.caret });
+
+/** A spec case's key in a divergence table: [text, caret], or [before, text, caret] after other lines. */
+const caseKey = (spec) => JSON.stringify(spec.before ? [spec.before, spec.text, spec.caret] : [spec.text, spec.caret]);
+
+/** The span of the spec case `c` (UTF-16) by `core`, in offsets of the case's line, or null. */
+function lineSpan(core, c, rule) {
+    const input = caseInput(c);
+    const span = core.completionWordSpan(input.text, input.caret, rule);
+    return span === null ? null : Object.fromEntries(Object.entries(span).map(([k, v]) => [k, v - c.before.length]));
 }
 
 const show = (text, caret) => JSON.stringify(text.slice(0, caret) + '|' + text.slice(caret));
@@ -175,29 +188,68 @@ buildTest('completionWordSpan and symbolPrefixStart give every spec case', (core
     const rule = core.wordBoundaryRule();
     assert.ok(SPEC.cases.length > 50, 'the spec has its cases');
     const wrong = [];
+    assert.ok(SPEC.cases.some((c) => c.start === null) && SPEC.cases.some((c) => c.before !== ''), 'the spec has text and multi-line cases');
     for (const c of SPEC.cases.map(utf16Case)) {
-        const span = core.completionWordSpan(c.text, c.caret, rule);
-        const got = [span.start, span.replaceStart, span.end];
+        const span = lineSpan(core, c, rule);
+        const got = span === null ? [null, null, null] : [span.start, span.replaceStart, span.end];
         const want = [c.start, c.replaceStart, c.end];
-        if (JSON.stringify(got) !== JSON.stringify(want)) wrong.push(`completionWordSpan ${show(c.text, c.caret)}: ${got}, want ${want}`);
-        const prefixStart = core.symbolPrefixStart(c.text, c.caret, rule);
-        if (prefixStart !== c.start) wrong.push(`symbolPrefixStart ${show(c.text, c.caret)}: ${prefixStart}, want ${c.start}`);
+        const at = show(c.before + c.text, c.before.length + c.caret);
+        if (JSON.stringify(got) !== JSON.stringify(want)) wrong.push(`completionWordSpan ${at}: ${got}, want ${want}`);
+        const input = caseInput(c);
+        const prefixStart = core.symbolPrefixStart(input.text, input.caret, rule);
+        const wantStart = c.start === null ? null : c.before.length + c.start;
+        if (prefixStart !== wantStart) wrong.push(`symbolPrefixStart ${at}: ${prefixStart}, want ${wantStart}`);
     }
     assert.deepStrictEqual(wrong, []);
 });
 
+// VS Code's word lookups see the caret's line alone, so they cannot read the caret's context
+// from the text's start. The spec cases whose word differs for that reason, by reason
+// ([text, caret] in code points, [before, text, caret] after other lines). Anything else
+// that differs fails the test, and so does an entry here that stops differing.
+const WORD_PATTERN_DIVERGENCES = {
+    "no completion word in a string's or comment's text, while VS Code's word lookup still finds one": [
+        ['; ab', 4], ['f"{x!r}"', 5], ['f"{x:>10}"', 7], ['f"\\N{ab}"', 7], ['f"""\n', '  text {x}', 4], ['(print "ab', 10],
+        ['a;b', 3],
+    ],
+    "an f/t-string field is a context read from the text's start (its delimiters and debug = end the word); the wordPattern lexes the line as code": [
+        ['f"{x!r}"', 4], ['f"{x:>10}"', 4], ['f"{x=}"', 4], ['f"{x =}"', 6], ['f"{x=}"', 5], ['t"{x!r}"', 4], ['f"""{x:>4}"""', 6],
+        ['f"""\n', '  Name: {name!r}', 13], ['f"""\n', '  Width: {w:>10}', 11], ['f"""\n', '  {x=}', 4], ['f"{x!r}', 4],
+        ['f"{a\\=}"', 5], ['f"""{x=', 6], ['f"""{x= ', 6], ['f"{x=\\', 4], ['f"}"\n', 'f"{x!r}"', 4], ['f"{\\=}"', 4], ['f"{\\=}"', 5],
+    ],
+    'a word starts after a string closed earlier in its run, which the wordPattern lexes from a stop character': [
+        ["(f '''a-b''')", 12], ["'''x:'''", 8], ["f\"{'''a-b'''}\"", 12],
+    ],
+};
+
+/** The divergence table `table` as a map from caseKey to reason. */
+function divergences(table) {
+    const known = new Map();
+    for (const [reason, cases] of Object.entries(table)) {
+        for (const key of cases) known.set(JSON.stringify(key), reason);
+    }
+    return known;
+}
+
 buildTest('VS Code finds the spec word of every spec case with the wordPattern', (core) => {
     const rule = core.wordBoundaryRule();
+    const known = divergences(WORD_PATTERN_DIVERGENCES);
+    const diverged = new Set();
     const exempt = [];
     const wrong = [];
-    for (const c of SPEC.cases.map(utf16Case)) {
-        const span = { ...c, leafStart: core.completionWordSpan(c.text, c.caret, rule).leafStart };
-        if (c.caret < span.leafStart) exempt.push({ c, leafStart: span.leafStart });
-        const [got, want] = [vscodeWord(c.text, c.caret), expectedWord(span, c.caret)];
-        if (JSON.stringify(got) !== JSON.stringify(want)) wrong.push(`${show(c.text, c.caret)}: ${JSON.stringify(got)}, want ${JSON.stringify(want)}`);
+    for (const spec of SPEC.cases) {
+        const c = utf16Case(spec);
+        const span = lineSpan(core, c, rule);
+        if (span !== null && c.caret < span.leafStart) exempt.push({ c, leafStart: span.leafStart });
+        const [got, want] = [vscodeWord(c.text, c.caret), span === null ? null : expectedWord(span, c.caret)];
+        const differs = JSON.stringify(got) !== JSON.stringify(want);
+        if (differs && known.has(caseKey(spec))) diverged.add(caseKey(spec));
+        else if (differs) wrong.push(`${caseKey(spec)}: ${JSON.stringify(got)}, want ${JSON.stringify(want)}`);
         assertNoEmptyMatch(c.text);
     }
-    assert.deepStrictEqual(wrong, []);
+    assert.deepStrictEqual(wrong, [], 'spec cases the wordPattern gets wrong');
+    const stale = [...known.keys()].filter((id) => !diverged.has(id));
+    assert.deepStrictEqual(stale, [], 'listed divergences that are not (or no longer) spec cases that differ');
     // Only a caret inside a real peeled front is exempt: the spec's word there is not empty
     // and starts before the leaf, and only peelable entries lie between, so a leafStart
     // past the true one cannot hide a regex word.
@@ -370,8 +422,8 @@ function lispythonWordSeparators() {
     return pkg.contributes.configurationDefaults['[lispython]']['editor.wordSeparators'] ?? VSCODE_DEFAULT_SEPARATORS;
 }
 
-// Spec cases (text, caret in code points) where one class per character cannot give the
-// spec's start..end, by reason. Anything else that differs fails the test, and so does an
+// Spec cases ([text, caret] in code points, [before, text, caret] after other lines) where
+// one class per character on the caret's line cannot give the spec's start..end, by reason. Anything else that differs fails the test, and so does an
 // entry here that stops differing.
 const SEPARATOR_DIVERGENCES = {
     // A sign is no separator (or `->f` and `swap!` would split), so the front stays on.
@@ -388,25 +440,37 @@ const SEPARATOR_DIVERGENCES = {
     ],
     'a meta char, prefix or opening is a separator even where it is part of a symbol': [
         ['a~b', 3], ['a@b', 3], ['a(b', 3], ["a'b", 3], ['except*', 7], ['**x', 1], ['**=', 3], ['^**=', 4],
-        ['~', 1], ['~@x', 1], ['*[1 2]', 1],
+        ['~', 1], ['~@x', 1], ['*[1 2]', 1], ['f"{(a:b)}"', 5], ['{x:y}', 2],
+    ],
+    // Intended: double-click selects a word wherever it stands.
+    "a string's or comment's text holds no completion word, but double-click selects one there": [
+        ["x'''", 4], ['; ab', 4], ['f"{{ab"', 6], ['f"{x!r}"', 5], ['f"{x:>10}"', 7], ['f"\\N{ab}"', 7], ["'''ab'''", 5],
+        ['f"""\n', '  text {x}', 4], ['"a\n', 'b"', 1], ['(print "ab', 10], ['f"{x!}"\n', '(print "abc")', 10],
+        ['x = f"{a:\n}"\n', '"abc"', 4], ['a;b', 3],
+    ],
+    "an f/t-string field is a context read from the text's start (its delimiters and debug = end the word); a class per character knows none": [
+        ['f"{x!r}"', 4], ['f"{x=}"', 4], ['f"{x =}"', 6], ['f"{x=}"', 5], ['t"{x!r}"', 4], ['f"""\n', '  Name: {name!r}', 13],
+        ['f"""\n', '  {x=}', 4], ['f"{x!r}', 4], ['f"{a\\=}"', 5], ['f"""{x=', 6], ['f"""{x= ', 6], ['f"{x=\\', 4],
+        ['f"}"\n', 'f"{x!r}"', 4], ['f"{\\=}"', 4], ['f"{\\=}"', 5],
+    ],
+    'a word starts after a string closed earlier in its run': [
+        ["(f '''a-b''')", 12], ["f\"{'''a-b'''}\"", 12],
     ],
 };
 
 test('double-click with the [lispython] editor.wordSeparators selects the spec word', () => {
     const separators = lispythonWordSeparators();
-    const known = new Map();
-    for (const [reason, cases] of Object.entries(SEPARATOR_DIVERGENCES)) {
-        for (const [text, caret] of cases) known.set(JSON.stringify([text, caret]), reason);
-    }
+    const known = divergences(SEPARATOR_DIVERGENCES);
     const wrong = [];
     const diverged = new Set();
     for (const spec of SPEC.cases) {
         const c = utf16Case(spec);
         const got = doubleClickWord(c.text, c.caret, separators);
-        const id = JSON.stringify([spec.text, spec.caret]);
-        const differs = JSON.stringify(got) !== JSON.stringify([c.start, c.end]);
+        const id = caseKey(spec);
+        const want = c.start === null ? null : [c.start, c.end];
+        const differs = JSON.stringify(got) !== JSON.stringify(want);
         if (differs && known.has(id)) diverged.add(id);
-        else if (differs) wrong.push(`${show(c.text, c.caret)}: ${JSON.stringify(got)}, want ${JSON.stringify([c.start, c.end])}`);
+        else if (differs) wrong.push(`${id}: ${JSON.stringify(got)}, want ${JSON.stringify(want)}`);
     }
     const stale = [...known.keys()].filter((id) => !diverged.has(id));
     assert.deepStrictEqual(wrong, [], 'spec cases the separators get wrong');
@@ -448,20 +512,36 @@ function exhaustiveLines(alphabet, maxLength) {
     return out;
 }
 
-/** The corpus: every short lexer line, random short lines, lines over 15 columns, and a few multi-line texts. */
+// The f/t-string reader's own characters: fields, conversions, specs, the debug =, escapes
+// (\, \N{), quotes, comments and line breaks, so its modes and refusals are exercised.
+const FIELD_ALPHABET = [
+    'f', 'r', 't', 'N', 'x', 'a', '1', '{', '}', ':', '!', '=', '\\', '"', "'", '(', ')', '[', ']', ';',
+    ' ', '\n', '\r', '>', '-', '.', '_', '\u{1D465}',
+];
+// How a field text starts: in a literal, in its field, raw, a t-string, a triple-quoted
+// string, at a conversion (a valid name, so what follows it is what the reader checks).
+const FIELD_STARTS = ['f"', 'f"{', 'rf"', 't"', "'''", "f'''{", 'f"{x', '"', '', 'f"{x!r', 'f"{x!a'];
+
+/**
+ * The corpus: every short lexer line, random short lines, lines over 15 columns, and texts
+ * of several lines: random lines, and random field texts from FIELD_STARTS.
+ */
 function corpus() {
     const random = prng(1184);
-    const line = (min, max) => {
+    const pick = (xs) => xs[Math.floor(random() * xs.length)];
+    const chars = (alphabet, min, max) => {
         const n = min + Math.floor(random() * (max - min + 1));
         let s = '';
-        for (let i = 0; i < n; i++) s += ALPHABET[Math.floor(random() * ALPHABET.length)];
+        for (let i = 0; i < n; i++) s += pick(alphabet);
         return s;
     };
+    const line = (min, max) => chars(ALPHABET, min, max);
     const lines = exhaustiveLines(LEXER_ALPHABET, 3);
     for (let i = 0; i < 1500; i++) lines.push(line(1, 7));
     for (let i = 0; i < 300; i++) lines.push(line(16, 40));
     const texts = [];
     for (let i = 0; i < 100; i++) texts.push(`${line(1, 6)}\n${line(1, 6)}`);
+    for (let i = 0; i < 3000; i++) texts.push(pick(FIELD_STARTS) + chars(FIELD_ALPHABET, 1, 12));
     return { lines, texts };
 }
 
@@ -472,6 +552,16 @@ function carets(text) {
     return out;
 }
 
+/**
+ * Whether the wordPattern can know the completion word at `caret` of the one-line `text`: the
+ * caret is in top-level code with no string closed before it on the line (the regex re-lexes
+ * the run from its start as code), or the reader refuses the text (the line is then code).
+ */
+function wordPatternReads(core, text, caret, rule) {
+    const found = core.caretContext(text, caret, rule);
+    return found === null || (found.context === 'code' && found.resume === 0);
+}
+
 buildTest('fuzz: the wordPattern word is the completionWordSpan word, and never empty', (core) => {
     const rule = core.wordBoundaryRule();
     const { lines } = corpus();
@@ -479,27 +569,13 @@ buildTest('fuzz: the wordPattern word is the completionWordSpan word, and never 
     for (const text of lines) {
         assertNoEmptyMatch(text);
         for (const caret of carets(text)) {
+            if (!wordPatternReads(core, text, caret, rule)) continue;
             const span = core.completionWordSpan(text, caret, rule);
             assert.deepStrictEqual(vscodeWord(text, caret), expectedWord(span, caret), show(text, caret));
             checked++;
         }
     }
     assert.ok(checked > 10000, `${checked} carets`);
-});
-
-buildTest('fuzz: a newline bounds the word as the line end does', (core) => {
-    const rule = core.wordBoundaryRule();
-    for (const text of corpus().texts) {
-        const nl = text.indexOf('\n');
-        const parts = [[text.slice(0, nl), 0], [text.slice(nl + 1), nl + 1]];
-        for (const [part, offset] of parts) {
-            for (const caret of carets(part)) {
-                const alone = core.completionWordSpan(part, caret, rule);
-                const shifted = Object.fromEntries(Object.entries(alone).map(([k, v]) => [k, v + offset]));
-                assert.deepStrictEqual(core.completionWordSpan(text, caret + offset, rule), shifted, show(text, caret + offset));
-            }
-        }
-    }
 });
 
 // The live lispython, for the tests that compare against it rather than the pinned spec.
@@ -514,27 +590,87 @@ function runPython(args, input) {
     return r.stdout;
 }
 
-// Reads [[text, caret], ...] (code points) as JSON on stdin; writes the spans as JSON.
+// Reads [[before, line, col], ...] (code points) as JSON on stdin; writes, per query, where
+// the reader refuses the text before the caret, [null, the error's message] (null when it
+// stopped with none), else its caret_context's context and resume and the
+// completion_word_span.
 const SPANS_PY = `
 import json, sys
-from lispy.core.parser import completion_word_span
+from lispy.core.parser import caret_context, caret_tokens, completion_word_span
 queries = json.loads(sys.stdin.buffer.read().decode("utf-8"))
-json.dump([completion_word_span(text, caret) for text, caret in queries], sys.stdout)
+out = []
+for before, line, col in queries:
+    found = caret_context(before + line, len(before) + col)
+    if found is None:
+        tokens = caret_tokens(line, col, before)
+        out.append([None, tokens[-1][0] if tokens and tokens[-1][1] == "error" else None])
+    else:
+        out.append([found[0], found[1], completion_word_span(line, col, before)])
+json.dump(out, sys.stdout)
 `;
 
-buildTest('fuzz: completionWordSpan is lispython\'s completion_word_span', (core, t) => {
+// The one refusal caretContext does not make: a conversion name other than s, r and a, a
+// set the spec does not publish (a client need not agree on a text the reader refuses).
+const UNPORTED_REFUSAL = "expected 's', 'r', or 'a'";
+
+/** The lexer's line breaks (split_lines). */
+const LINE_BREAK = /\r\n|\r|\n/g;
+
+/** [before, line, caret in the line] of UTF-16 offset `caret` of `text`, or null inside a CRLF. */
+function lineInput(text, caret) {
+    let lineStart = 0;
+    for (const m of text.matchAll(LINE_BREAK)) {
+        const end = m.index + m[0].length;
+        if (end > caret) {
+            if (m.index < caret) return null;
+            return [text.slice(0, lineStart), text.slice(lineStart, m.index), caret - lineStart];
+        }
+        lineStart = end;
+    }
+    return [text.slice(0, lineStart), text.slice(lineStart), caret - lineStart];
+}
+
+buildTest('fuzz: caretContext and completionWordSpan are lispython\'s caret_context and completion_word_span', (core, t) => {
     if (checkout === undefined) return t.skip(lispythonMissing);
     const rule = core.wordBoundaryRule();
     const { lines, texts } = corpus();
     const queries = [];
-    for (const text of [...lines, ...texts]) for (const caret of carets(text)) queries.push([text, caret]);
-    const spans = JSON.parse(runPython(['-c', SPANS_PY], JSON.stringify(queries.map(([text, caret]) => [text, codePoints(text, caret)]))));
-    assert.strictEqual(spans.length, queries.length);
-    queries.forEach(([text, caret], i) => {
-        const span = core.completionWordSpan(text, caret, rule);
-        const expected = spans[i].map((cp) => utf16(text, cp));
-        assert.deepStrictEqual([span.start, span.replaceStart, span.end], expected, show(text, caret));
+    for (const text of [...lines, ...texts]) {
+        for (const caret of carets(text)) {
+            const input = lineInput(text, caret);
+            if (input !== null) queries.push({ text, caret, input });
+        }
+    }
+    const asCodePoints = ({ input: [before, line, col] }) => [before, line, codePoints(line, col)];
+    const answers = JSON.parse(runPython(['-c', SPANS_PY], JSON.stringify(queries.map(asCodePoints))));
+    assert.strictEqual(answers.length, queries.length);
+    const seen = { checked: 0, text: 0, field: 0, multiLine: 0, refused: 0 };
+    queries.forEach(({ text, caret, input: [before, line] }, i) => {
+        const [context, resume, span] = answers[i];
+        const scanned = before + line;
+        const at = show(text, caret);
+        if (context === null) {
+            // The reader refuses the text before the caret: so does caretContext, but for
+            // the unported check. Its word is then no concern (the client need not agree).
+            if (resume === null || !resume.includes(UNPORTED_REFUSAL)) {
+                assert.strictEqual(core.caretContext(scanned, caret, rule), null, `caretContext ${at}, refused: ${resume}`);
+                seen.refused++;
+            }
+            return;
+        }
+        assert.deepStrictEqual(core.caretContext(scanned, caret, rule), { context, resume: utf16(scanned, resume) }, `caretContext ${at}`);
+        // The whole text: what follows the caret's line is never read.
+        const got = core.completionWordSpan(text, caret, rule);
+        const expected = span === null ? null : span.map((cp) => before.length + utf16(line, cp));
+        assert.deepStrictEqual(got === null ? null : [got.start, got.replaceStart, got.end], expected, `completionWordSpan ${at}`);
+        seen.checked++;
+        if (context === 'text') seen.text++;
+        if (context === 'field' || context === 'bracket') seen.field++;
+        if (before !== '') seen.multiLine++;
     });
+    // The corpus reaches what the field alphabet is there for.
+    assert.ok(seen.checked > 50000 && seen.text > 10000 && seen.field > 4000 && seen.multiLine > 4000 && seen.refused > 1000,
+        JSON.stringify(seen));
 });
 
 // --- the pinned spec and its derived files are current --------------------------------
