@@ -1064,9 +1064,15 @@ async function fetchNreplCompletions(
     position: vscode.Position,
 ): Promise<{ items: NreplCompletionItem[]; range: vscode.Range } | undefined> {
     if (!nreplConnected()) return undefined;
-    const lineText = document.lineAt(position.line).text;
-    const start = symbolPrefixStart(lineText, position.character, wordBoundaryRule());
-    const prefix = lineText.slice(start, position.character);
+    // The text from the document's start through the caret's line: the caret's context (an
+    // f-string field, a string still open) is read from the start.
+    const line = document.lineAt(position.line);
+    const text = document.getText(new vscode.Range(new vscode.Position(0, 0), line.range.end));
+    const caret = document.offsetAt(position);
+    const offset = symbolPrefixStart(text, caret, wordBoundaryRule());
+    if (offset === null) return undefined; // a string's or comment's text
+    const start = position.character - (caret - offset);
+    const prefix = line.text.slice(start, position.character);
     if (!prefix) return undefined;
     try {
         const result = await nreplRequest(completeMessage(prefix, document));

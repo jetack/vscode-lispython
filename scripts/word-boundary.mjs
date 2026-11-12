@@ -7,8 +7,9 @@
 // `python -m lispy.word_boundary` (lispython owns the rule: completion_word_span in
 // src/lispy/core/parser.py). After lispython changes it, re-run that command into
 // test/word-boundary.json, then this script. It writes:
-//   - src/wordBoundaryRule.ts: the rule tables and JS-ready regex sources that
-//     completionWordSpan (src/nreplCore.ts) implements the spec steps over;
+//   - src/wordBoundaryRule.ts: the rule tables and JS-ready regex sources (the lexer's
+//     token regex of each context among them) that caretContext and completionWordSpan
+//     (src/nreplCore.ts) implement the spec steps over;
 //   - the "wordPattern" of language-configuration.json, the same boundary as one regex
 //     for VS Code's own word lookup (word highlight, suggest's re-ask and refilter);
 //   - the [lispython] "editor.wordSeparators" default in package.json, a per-character
@@ -30,7 +31,7 @@ const GENERATED = `${GENERATED_BY} from test/word-boundary.json; do not edit`;
 
 // The steps completionWordSpan and the wordPattern below implement are this version's.
 // A new version may change the steps' prose, so it fails here until both are reviewed.
-const SPEC_VERSION = 5;
+const SPEC_VERSION = 6;
 
 // --- Python re (over str) to JS (u flag) ---------------------------------------------
 
@@ -44,6 +45,8 @@ const WORD_CLASS_BODY = `${ALNUM_CLASS_BODY}_`;
 const DIGIT_CLASS_BODY = '\\p{Nd}';
 // Characters a u-mode JS regex accepts escaped (outside a class / inside one).
 const SYNTAX_CHARS = '^$\\.*+?()[]{}|/';
+// The end of the input: no character follows (JS \s\S is every code unit).
+const END_OF_INPUT = '(?![\\s\\S])';
 const CLASS_ESCAPABLE = `${SYNTAX_CHARS}-`;
 
 /**
@@ -60,6 +63,11 @@ function translatePythonRegex(py) {
             const n = py[++i];
             if (n === 'd') out += DIGIT_CLASS_BODY; // a \p escape stands alone or in a class
             else if (n === 'w') out += inClass ? WORD_CLASS_BODY : `[${WORD_CLASS_BODY}]`;
+            else if (n === 'r' || n === 'n') out += `\\${n}`;
+            // Python's \Z is the end of the input (of the slice, with an endpos); JS $ without
+            // the m flag is too, but Python's own $ is not (it also matches before a final \n),
+            // so \Z gets a form no reader mistakes for either.
+            else if (n === 'Z' && !inClass) out += END_OF_INPUT;
             else if (n !== undefined && (inClass ? CLASS_ESCAPABLE : SYNTAX_CHARS).includes(n)) out += `\\${n}`;
             else if (n === '-') out += '-';
             else throw new Error(`untranslated escape \\${n} in ${py}`);
@@ -139,12 +147,90 @@ function readSpec() {
     return spec;
 }
 
+/** `chars` (one-character strings) as one string, each a single UTF-16 unit. */
+function bmpChars(name, chars) {
+    for (const c of chars) {
+        if (c.length !== 1) throw new Error(`${name}: ${JSON.stringify(c)} is no single BMP character; the UTF-16 walks assume one unit`);
+    }
+    return chars.join('');
+}
+
+// The label of each token pattern, in the order the lexer tries them (_token_patterns).
+const TOKEN_LABELS = [
+    'opening', 'closing', 'string', 'dangling-quote', 'meta-indicator', 'bad-prefix', 'comment',
+    'number', 'comma', 'symbol', 'new-line', 'spaces',
+];
+
+/**
+ * The lexer's token regex in code (`inField` false), at a field's own level (`fieldLevel`)
+ * or inside a field's brackets: each pattern a capture group, in TOKEN_LABELS order, as
+ * lispython's _token_patterns assembles them from the pieces the spec publishes.
+ *
+ * Python's $ (no MULTILINE) also matches before a final \n, JS $ (no m flag) only at the
+ * input's end; every lookahead taking $ here also takes \n (a stop, form-end and
+ * number-end character, checked below), so both accept the same positions. Python's
+ * possessive ++ and *+ are plain + and * here: each ends its pattern (nothing after it
+ * could make the regex give characters back), so the match is the same; Python needs
+ * them only against its backtracking memory.
+ */
+function tokenRegex(rule, inField, fieldLevel) {
+    for (const [name, chars] of [['stopChars', rule.stopChars], ['formEndChars', rule.formEndChars], ['numberEndChars', rule.numberEndChars]]) {
+        if (!chars.includes('\n')) throw new Error(`${name} lacks \\n: Python's $ and JS's $ would differ`);
+    }
+    const S = classBody(rule.stopChars);
+    const F = classBody(rule.formEndChars);
+    const N = classBody(rule.numberEndChars);
+    const delimiter = translatePythonRegex(rule.fieldDelimiter);
+    const continuation = translatePythonRegex(rule.fieldContinuation);
+    const symbolBackslash = translatePythonRegex(rule.fieldSymbolBackslash);
+    const literals = (entries) => alt(byLengthDesc(entries).map(literal));
+    let end = fieldLevel ? `$|${delimiter}` : '$';
+    if (inField) end = `${continuation}|${end}`;
+    // Longest first, as the lexer tries them; a bad prefix stands before any of them, so
+    // before the shortest (each longer one starts with it).
+    const escapedOpenings = byLengthDesc(rule.escapedStringOpenings);
+    const shortestEscaped = escapedOpenings.at(-1);
+    for (const e of escapedOpenings) {
+        if (!e.startsWith(shortestEscaped)) throw new Error(`escaped opening ${e} does not start with ${shortestEscaped}`);
+    }
+    const escaped = escapedOpenings.map(literal);
+    const quote = inField ? `${escaped.join('|')}|` : '';
+    const stopAhead = inField ? `(?=[${S}]|${literal(shortestEscaped)}|${end})` : `(?=[${S}]|${end})`;
+    const fieldClose = rule.fieldBraces[1];
+    const [char, commentChar] = fieldLevel
+        ? [`(?!${delimiter})[^${classBody([...rule.stopChars, rule.backslash])}]`,
+            `(?!${delimiter})[^${classBody([...rule.lineBreakChars, fieldClose])}]`]
+        : [`[^${classBody([...rule.stopChars, rule.backslash])}]`, `[^${classBody(rule.lineBreakChars)}]`];
+    const wrapper = literals(rule.wrappers);
+    const opening = literals(rule.openings);
+    const meta = literals(rule.metaChars);
+    const patterns = {
+        opening: `${wrapper}${opening}`,
+        closing: literals(rule.closings),
+        string: `${translatePythonRegex(rule.stringPrefix)}(?:${quote}${byLengthDesc(rule.stringOpenings).map(literal).join('|')})`,
+        'dangling-quote': `${wrapper}${literals(rule.danglingQuotes)}(?=[${F}]|${end})`,
+        'meta-indicator': `${wrapper}${meta}(?![${F}]|${end})`,
+        'bad-prefix': `\\^\\*+(?:${opening}|${meta}|${stopAhead})`,
+        comment: `;(?:${commentChar})*`,
+        number: `(?:${translatePythonRegex(rule.numberToken)})(?=[${N}]|${end})`,
+        comma: ',',
+        symbol: inField ? `(?:${char}|${symbolBackslash})+${fieldLevel ? `|${delimiter}` : ''}` : `[^${S}]+`,
+        'new-line': '\\n',
+        spaces: inField ? `(?: |${continuation})+` : ' +',
+    };
+    const source = TOKEN_LABELS.map((label) => `(${patterns[label]})`).join('|');
+    // The label is read off which group matched, so the pieces must hold no group of their own.
+    const groups = new RegExp(`(?:${source})|`, 'u').exec('').length - 1;
+    if (groups !== TOKEN_LABELS.length) throw new Error(`the token regex has ${groups} groups, not ${TOKEN_LABELS.length}`);
+    return source;
+}
+
 /** The rule as JS-ready tables and regex sources: the body of wordBoundaryRule(). */
 function jsRule(rule) {
-    const stopChars = rule.stopChars.join('');
+    const stopChars = bmpChars('stopChars', rule.stopChars);
     const formEndChars = rule.formEndChars.join('');
     const numberEndChars = rule.numberEndChars.join('');
-    for (const c of rule.stopChars) if (c.codePointAt(0) > 0xffff) throw new Error('an astral stop char: the UTF-16 walk assumes BMP');
+    if (rule.kindLetters.some(([letter]) => letter.length !== 1)) throw new Error('a kindLetters entry is no single letter');
     return {
         stopChars,
         formEndChars,
@@ -166,6 +252,33 @@ function jsRule(rule) {
         stringPrefix: translatePythonRegex(rule.stringPrefix),
         numberToken: translatePythonRegex(rule.numberToken),
         signedComplex: translatePythonRegex(rule.signedComplex),
+        // The scan (caretContext) and the run lex: the token regex of each context, and
+        // the label of each of its groups.
+        tokenLabels: TOKEN_LABELS,
+        codeToken: tokenRegex(rule, false, false),
+        fieldToken: tokenRegex(rule, true, true),
+        bracketToken: tokenRegex(rule, true, false),
+        closings: byLengthDesc(rule.closings),
+        escapedStringOpenings: byLengthDesc(rule.escapedStringOpenings),
+        rawLetter: rule.rawLetter,
+        // The letters only: the first held makes the literal an f/t-string, and the lexer
+        // reads both kinds alike (the kind's name only words lispython's messages).
+        kindLetters: rule.kindLetters.map(([letter]) => letter),
+        plainBodyStops: bmpChars('plainBodyStops', rule.plainBodyStops),
+        interpolatedBodyStops: bmpChars('interpolatedBodyStops', rule.interpolatedBodyStops),
+        fieldBraces: bmpChars('fieldBraces', rule.fieldBraces),
+        backslash: rule.backslash,
+        namedEscape: rule.namedEscape,
+        quoteChars: bmpChars('quoteChars', rule.quoteChars),
+        escapedQuote: rule.escapedQuote,
+        bareQuote: rule.bareQuote,
+        lineBreakChars: bmpChars('lineBreakChars', rule.lineBreakChars),
+        whitespace: bmpChars('whitespace', rule.whitespace),
+        fieldDelimiter: translatePythonRegex(rule.fieldDelimiter),
+        conversionEnds: bmpChars('conversionEnds', rule.conversionEnds),
+        debugBlockers: bmpChars('debugBlockers', rule.debugBlockers),
+        // A conversion's name character: Python's isalnum() or _ (\w over str).
+        wordChar: `[${WORD_CLASS_BODY}]`,
     };
 }
 
@@ -368,9 +481,9 @@ function ruleSource(js) {
     return `// ${GENERATED}.
 //
 // lispython's completion word boundary rule (completion_word_span), as tables and JS
-// regex sources (u flag) for completionWordSpan in nreplCore.ts. Python's \\d and \\w are
-// translated to \\p{Nd} and [\\p{L}\\p{N}_]; the stop, form-end and number-end classes
-// list the spec's code points, never JS \\s, which differs from Python's isspace.
+// regex sources (u flag) for caretContext and completionWordSpan in nreplCore.ts.
+// Python's \\d and \\w are translated to \\p{Nd} and [\\p{L}\\p{N}_]; the character
+// classes list the spec's code points, never JS \\s, which differs from Python's isspace.
 
 /** The word boundary rule; a function declaration so it can be injected into the REPL webview. */
 export function wordBoundaryRule() {
