@@ -773,8 +773,6 @@ export interface CaretContext {
      * offset, or where the scan last resumed past a refusal, whichever is later (0 when none).
      */
     resume: number;
-    /** Whether the reader refuses the text before the offset (the scan recovered past it). */
-    refused: boolean;
 }
 
 /**
@@ -806,8 +804,7 @@ export function fieldBlanksEnd(text: string, i: number, rule: WordBoundaryRule):
  * rules). An unclosed string or literal is no refusal: its text holds the offset. Past a
  * refusal the scan goes on in place, as the reader recovers: the stack keeps its entries up
  * to its innermost literal, and the scan resumes in that literal's text at the refusal's end
- * (or where it last resumed, when later), so it always reaches the offset; `refused` says
- * whether it did (where lispython's caret_context is None). The lexer reads past the offset
+ * (or where it last resumed, when later), so it always reaches the offset. The lexer reads past the offset
  * where lispython's does (to a string's closing quote), so `text` must end where the caller's
  * scan ends.
  * Injected into the webview, so self-contained but for the injected fieldBlanksEnd.
@@ -840,7 +837,7 @@ export function caretContext(text: string, offset: number, rule: WordBoundaryRul
     // `emitted` counts the tokens lispython's lexer emits, so a field whose count has not
     // moved since its `{` has no expression yet (a leading `=` is refused there).
     const state = {
-        pos: 0, emitted: 0, closedStringEnd: 0, resumedAt: 0, refused: false, done: false,
+        pos: 0, emitted: 0, closedStringEnd: 0, resumedAt: 0, done: false,
         context: 'code' as CaretContext['context'],
     };
     const pastStop = (i: number) => i >= offset;
@@ -859,7 +856,6 @@ export function caretContext(text: string, offset: number, rule: WordBoundaryRul
     // found ahead of it), so every refusal moves the scan forward or pops a literal and the
     // scan always ends.
     const refuse = (start: number, end: number, ownLiteral = false) => {
-        state.refused = true;
         dropFields();
         if (stack.length && (ownLiteral || end <= state.resumedAt)) {
             stack.pop();
@@ -1049,7 +1045,9 @@ export function caretContext(text: string, offset: number, rule: WordBoundaryRul
         if (pastStop(end) && !((brk !== null && !pastStop(brk)) || (stop === 'mixed' && !pastStop(at)))) return reached('text');
         if (brk !== null) return refuse(brk, brk + 1);
         if (stop === 'mixed') return refuse(literal.quoteStart, literal.body, true);
-        if (stop === 'eof') return reached('text'); // never: the text's end lies at or past the offset
+        // Never taken (the text's end lies at or past the offset, so pastStop held above), but
+        // kept as the scan's stop: without it an eof would fall through to closeField below.
+        if (stop === 'eof') return reached('text');
         if (stop === 'quote' && spec !== null) return refuse(at, at + literal.quote.length);
         state.emitted++;
         if (stop === 'quote') {
@@ -1071,7 +1069,7 @@ export function caretContext(text: string, offset: number, rule: WordBoundaryRul
         else if (top.kind === 'field' && !top.spec) token(top);
         else body(top);
     }
-    return { context: state.context, resume: Math.max(state.closedStringEnd, state.resumedAt), refused: state.refused };
+    return { context: state.context, resume: Math.max(state.closedStringEnd, state.resumedAt) };
 }
 
 /**

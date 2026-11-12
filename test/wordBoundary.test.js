@@ -549,14 +549,19 @@ function exhaustiveLines(alphabet, maxLength) {
 }
 
 // The f/t-string reader's own characters: fields, conversions, specs, the debug =, escapes
-// (\, \N{), quotes, comments and line breaks, so its modes and refusals are exercised.
+// (\, \N{), quotes, comments and line breaks, so its modes and refusals are exercised; the
+// prefix letters in both cases, so a conversion name glued to a quote takes each prefix branch.
 const FIELD_ALPHABET = [
     'f', 'r', 't', 'N', 'x', 'a', '1', '{', '}', ':', '!', '=', '\\', '"', "'", '(', ')', '[', ']', ';',
-    ' ', '\n', '\r', '>', '-', '.', '_', '\u{1D465}',
+    ' ', '\n', '\r', '>', '-', '.', '_', '\u{1D465}', 'b', 'u', 's', 'R', 'B', 'F',
 ];
 // How a field text starts: in a literal, in its field, raw, a t-string, a triple-quoted
-// string, at a conversion (a valid name, so what follows it is what the reader checks).
-const FIELD_STARTS = ['f"', 'f"{', 'rf"', 't"', "'''", "f'''{", 'f"{x', '"', '', 'f"{x!r', 'f"{x!a'];
+// string, at a conversion (a valid name, so what follows it is what the reader checks; or
+// none, so the name is random; or a string prefix in either case, which a quote may follow).
+const FIELD_STARTS = [
+    'f"', 'f"{', 'rf"', 't"', "'''", "f'''{", 'f"{x', '"', '', 'f"{x!r', 'f"{x!a', 'f"{x!', 'f"{x!b', 'f"{x!Rb', 'f"{x!F',
+    'f"{x!U', 'f"{x!bR', 'f"{x!Fr',
+];
 // Lines the reader refuses, a refusal of each kind (a bad conversion name, a single }, a
 // leading =, an empty conversion, a conversion string, a quote in a spec, a bare " in an
 // escaped literal), some leaving a literal open for the lines below.
@@ -567,7 +572,8 @@ const REFUSED_LINES = [
 
 /**
  * The corpus: every short lexer line, random short lines, lines over 15 columns, and texts
- * of several lines: random lines, and random field texts from FIELD_STARTS.
+ * of several lines: random lines, random field texts from FIELD_STARTS, and a REFUSED_LINES
+ * line followed by random lines, read past its refusal.
  */
 function corpus() {
     const random = prng(1184);
@@ -639,9 +645,9 @@ function runPython(args, input) {
 }
 
 // Reads [[before, line, col], ...] (code points) as JSON on stdin; writes, per query, whether
-// the reader refuses the text before the caret (caret_context None), the context and resume of
-// its recovered reading (_recovered_context, caret_context's where it refuses nothing) and the
-// completion_word_span.
+// the reader refuses the text before the caret and the text before its line (caret_context
+// None), the context and resume of its recovered reading (_recovered_context, caret_context's
+// where it refuses nothing) and the completion_word_span.
 const SPANS_PY = `
 import json, sys
 from lispy.core.parser import _recovered_context, caret_context, completion_word_span
@@ -651,7 +657,8 @@ for before, line, col in queries:
     text, offset = before + line, len(before) + col
     context, resume, _ = _recovered_context(text, offset)
     refused = caret_context(text, offset) is None
-    out.append([refused, context, resume, completion_word_span(line, col, before)])
+    above = caret_context(before, len(before)) is None
+    out.append([refused, above, context, resume, completion_word_span(line, col, before)])
 json.dump(out, sys.stdout)
 `;
 
@@ -688,11 +695,11 @@ buildTest('fuzz: caretContext and completionWordSpan are lispython\'s recovered 
     assert.strictEqual(answers.length, queries.length);
     const seen = { checked: 0, text: 0, field: 0, multiLine: 0, recovered: 0, recoveredBelow: 0 };
     queries.forEach(({ text, caret, input: [before, line] }, i) => {
-        const [refused, context, resume, span] = answers[i];
+        const [refused, above, context, resume, span] = answers[i];
         const scanned = before + line;
         const at = show(text, caret);
-        assert.deepStrictEqual(core.caretContext(scanned, caret, rule), { context, resume: utf16(scanned, resume), refused },
-            `caretContext ${at}`);
+        assert.deepStrictEqual(core.caretContext(scanned, caret, rule), { context, resume: utf16(scanned, resume) },
+            `caretContext ${at}${refused ? ' (refused)' : ''}`);
         // The whole text: what follows the caret's line is never read.
         const got = core.completionWordSpan(text, caret, rule);
         const expected = span === null ? null : span.map((cp) => before.length + utf16(line, cp));
@@ -703,7 +710,7 @@ buildTest('fuzz: caretContext and completionWordSpan are lispython\'s recovered 
         if (before !== '') seen.multiLine++;
         if (refused) seen.recovered++;
         // The text before the caret's line is refused already: the line is read past it.
-        if (refused && core.caretContext(before, before.length, rule).refused) seen.recoveredBelow++;
+        if (refused && above) seen.recoveredBelow++;
     });
     // The corpus reaches what the field alphabet and the refused lines are there for.
     assert.ok(seen.checked > 50000 && seen.text > 10000 && seen.field > 4000 && seen.multiLine > 4000
